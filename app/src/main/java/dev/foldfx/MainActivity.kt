@@ -8,7 +8,6 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -26,9 +25,6 @@ import android.widget.Toast
 
 class MainActivity : Activity(), SensorEventListener {
 
-    companion object {
-        private const val REQ_CAPTURE = 42
-    }
 
     private lateinit var sensors: SensorManager
     private var hinge: Sensor? = null
@@ -37,6 +33,7 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var statusText: TextView
     private lateinit var blurLabel: TextView
     private lateinit var logText: TextView
+    private lateinit var autoButton: Button
     private val logUpdater = object : Runnable {
         override fun run() {
             logText.text = FoldOverlayService.logText().ifEmpty { "(nothing yet)" }
@@ -79,9 +76,15 @@ class MainActivity : Activity(), SensorEventListener {
         })
 
         col.addView(button("2. Start fold animation (choose \"Entire screen\")") {
-            val mpm = getSystemService(MediaProjectionManager::class.java)
-            startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE)
+            startActivity(Intent(this, CaptureActivity::class.java))
+            handler.postDelayed({ refresh() }, 1500)
         })
+
+        autoButton = button("") {
+            Prefs.setAutoReenable(this, !Prefs.autoReenable(this))
+            refresh()
+        }
+        col.addView(autoButton)
 
         col.addView(button("Test effect (no folding needed)") {
             startForegroundService(
@@ -146,21 +149,6 @@ class MainActivity : Activity(), SensorEventListener {
         }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_CAPTURE) return
-        val i = Intent(this, FoldOverlayService::class.java)
-        if (resultCode == RESULT_OK && data != null) {
-            i.putExtra(FoldOverlayService.EXTRA_CODE, resultCode)
-            i.putExtra(FoldOverlayService.EXTRA_DATA, data)
-        } else {
-            Toast.makeText(this, "No screen capture: running with blur only", Toast.LENGTH_LONG).show()
-        }
-        startForegroundService(i)
-        handler.postDelayed({ refresh() }, 600)
-    }
-
     private val blurListener = java.util.function.Consumer<Boolean> { refresh() }
 
     override fun onResume() {
@@ -208,6 +196,8 @@ class MainActivity : Activity(), SensorEventListener {
             append("\nFold the phone slowly and watch the angle above. It should change smoothly.")
         }
         blurLabel.text = "Max blur: ${Prefs.maxBlur(this)} px"
+        autoButton.text = "Re-enable screen capture after unlock: " +
+            (if (Prefs.autoReenable(this)) "ON" else "OFF") + " (tap to change)"
     }
 
     private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
