@@ -34,11 +34,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
-import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
 /**
  * iPhone Duo-style fold animation.
@@ -62,9 +59,24 @@ class FoldOverlayService : Service(), SensorEventListener {
         @Volatile var captureActive = false
             private set
 
+        private val logLines = ArrayDeque<String>()
+        private var logT0 = 0L
+
+        fun log(msg: String) {
+            val now = SystemClock.uptimeMillis()
+            if (logT0 == 0L) logT0 = now
+            synchronized(logLines) {
+                logLines.addLast("%6.2fs  %s".format((now - logT0) / 1000f, msg))
+                while (logLines.size > 40) logLines.removeFirst()
+            }
+        }
+
+        fun logText(): String = synchronized(logLines) { logLines.joinToString("\n") }
+
         private const val CHANNEL = "foldfx"
-        private const val HOLD_MS = 450L            // effect lingers this long after movement stops
-        private const val START_THRESHOLD = 3f      // degrees of movement that start the effect
+        private const val HOLD_MS = 200L            // effect lingers this long after movement stops
+        private const val START_THRESHOLD = 10f     // degrees of movement that start the effect
+        private const val DISSOLVE_MS = 420f        // dissolve after the cover/inner screen switch
         private const val SNAPSHOT_TIMEOUT_MS = 160L
         private const val PREVIEW_MS = 1600L
     }
@@ -104,10 +116,15 @@ class FoldOverlayService : Service(), SensorEventListener {
     private var frameRunning = false
     private var preview = false
     private var animStartAt = 0L
+    private var startW = 0
+    private var startH = 0
+    private var switchedAt = 0L
+    private var lastLoggedSize = ""
 
     private val frame = Choreographer.FrameCallback { tick() }
     private val snapshotTimeout = Runnable {
         if (state == State.CAPTURING) {
+            log("snapshot timed out (no frame)")
             pauseCapture()
             beginAnimation()
         }
@@ -129,6 +146,7 @@ class FoldOverlayService : Service(), SensorEventListener {
         }
         sensors.registerListener(this, hinge, SensorManager.SENSOR_DELAY_FASTEST)
         running = true
+        log("service started")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -170,10 +188,12 @@ class FoldOverlayService : Service(), SensorEventListener {
         val mp = runCatching { mpm.getMediaProjection(code, data) }.getOrNull() ?: return
         mp.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
+                log("screen capture STOPPED by system")
                 main.post { releaseCapture() }
             }
         }, main)
         projection = mp
+        log("screen capture granted")
 
         val (w, h) = captureSize()
         val r = newReader(w, h)
@@ -211,6 +231,7 @@ class FoldOverlayService : Service(), SensorEventListener {
         state = State.CAPTURING
         val vd = virtualDisplay
         if (vd == null) {
+            log("no screen capture, blur only")
             beginAnimation()
             return
         }
@@ -235,6 +256,7 @@ class FoldOverlayService : Service(), SensorEventListener {
                 main.removeCallbacks(snapshotTimeout)
                 snapshot?.recycle()
                 snapshot = runCatching { toBitmap(img) }.getOrNull()
+                log("snapshot " + (snapshot?.let { "${it.width}x${it.height}" } ?: "FAILED"))
                 pauseCapture()
                 beginAnimation()
             }
@@ -289,7 +311,14 @@ class FoldOverlayService : Service(), SensorEventListener {
         if (abs(a - targetAngle) > 0.5f) lastMoveAt = now
         targetAngle = a
 
+        val sizeNow = wm.currentWindowMetrics.bounds.let { "${it.width()}x${it.height()}" }
+        if (sizeNow != lastLoggedSize) {
+            log("display is now $sizeNow at ${a.roundToInt()}°")
+            lastLoggedSize = sizeNow
+        }
+
         if (state == State.IDLE && !preview && abs(a - restAngle) > START_THRESHOLD) {
+            log("fold started at ${restAngle.roundToInt()}° (now ${a.roundToInt()}°)")
             startAngle = restAngle
             shownAngle = restAngle
             lastMoveAt = now
@@ -315,7 +344,10 @@ class FoldOverlayService : Service(), SensorEventListener {
         state = State.ANIMATING
         animStartAt = SystemClock.uptimeMillis()
         fade = 1f
+        switchedAt = 0L
+        wm.currentWindowMetrics.bounds.let { startW = it.width(); startH = it.height() }
         attach()
+        log(if (root != null) "overlay shown" else "overlay FAILED to show")
         snapView?.bitmap = snapshot
         if (!frameRunning) {
             frameRunning = true
@@ -326,28 +358,45 @@ class FoldOverlayService : Service(), SensorEventListener {
     private fun tick() {
         val now = SystemClock.uptimeMillis()
 
+        // Detect the moment the phone switches between cover screen and inner screen
+        val b = wm.currentWindowMetrics.bounds
+        if (switchedAt == 0L && (b.width() != startW || b.height() != startH)) {
+            switchedAt = now
+            log("screen switched to ${b.width()}x${b.height()} at ${shownAngle.roundToInt()}°")
+        }
+
         val moving: Boolean
         if (preview) {
             val e = (now - animStartAt).toFloat()
             val k = (e / PREVIEW_MS).coerceIn(0f, 1f)
             shownAngle = startAngle + (180f - startAngle) * smooth(k)
-            moving = e < PREVIEW_MS + 150
+            // Pretend the screens switch halfway through
+            if (switchedAt == 0L && k >= 0.5f) switchedAt = now
+            moving = e < PREVIEW_MS
         } else {
             shownAngle += (targetAngle - shownAngle) * 0.35f
             moving = now - lastMoveAt < HOLD_MS
         }
 
-        // Opening if we started mostly closed, closing if we started mostly open
         val endAngle = if (startAngle < 90f) 180f else 0f
         val span = abs(endAngle - startAngle).coerceAtLeast(20f)
         val u = (abs(shownAngle - startAngle) / span).coerceIn(0f, 1f)
-        val reachedEnd = abs(shownAngle - endAngle) < 3f
 
-        if (!moving || reachedEnd) fade += (0f - fade) * 0.18f
+        val done: Boolean
+        if (switchedAt > 0L) {
+            // After the switch: the old screen's content dissolves and the new screen sharpens
+            val k = ((now - switchedAt) / DISSOLVE_MS).coerceIn(0f, 1f)
+            renderAfterSwitch(k)
+            done = k >= 1f
+        } else {
+            // Before the switch: content blurs and zooms as you fold
+            if (!moving) fade += (0f - fade) * 0.3f
+            renderBeforeSwitch(u, fade)
+            done = !moving && fade < 0.01f
+        }
 
-        render(u, fade)
-
-        if ((!moving || reachedEnd) && fade < 0.01f) {
+        if (done) {
+            log("animation finished")
             finish()
         } else {
             Choreographer.getInstance().postFrameCallback(frame)
@@ -360,28 +409,46 @@ class FoldOverlayService : Service(), SensorEventListener {
         state = State.IDLE
         preview = false
         restAngle = targetAngle
+        switchedAt = 0L
         snapshot?.recycle()
         snapshot = null
     }
 
-    /**
-     * u: 0 = where the fold started, 1 = fully opened/closed.
-     * f: overall fade (1 while moving, eases to 0 at the end).
-     */
-    private fun render(u: Float, f: Float) {
+    /** u: how far through the fold (0..1). f: fade-out when you stop moving. */
+    private fun renderBeforeSwitch(u: Float, f: Float) {
+        val e = smooth((u / 0.45f).coerceIn(0f, 1f))   // reaches full effect by ~45% of the fold
+        applyLook(
+            snapAlpha = f,
+            scale = 1f + 0.10f * e,
+            snapBlur = 60f * e,
+            frost = 0.20f * e * f,
+            behindBlur = Prefs.maxBlur(this) * e * f
+        )
+    }
+
+    /** k: 0 right at the switch, 1 when the dissolve is complete. */
+    private fun renderAfterSwitch(k: Float) {
+        val out = 1f - smooth(k)
+        applyLook(
+            snapAlpha = out,
+            scale = 1.10f - 0.10f * smooth(k),
+            snapBlur = 60f * out,
+            frost = 0.20f * out,
+            behindBlur = Prefs.maxBlur(this) * out
+        )
+    }
+
+    private fun applyLook(snapAlpha: Float, scale: Float, snapBlur: Float, frost: Float, behindBlur: Float) {
         val sv = snapView ?: return
         val fv = frostView ?: return
         val r = root ?: return
         val p = params ?: return
 
-        // 1) Snapshot: zooms slightly, blurs, and dissolves during the first ~60% of the fold
-        val snapAlpha = (1f - smooth((u / 0.6f).coerceIn(0f, 1f))) * f
-        val scale = 1f + 0.12f * smooth(u)
-        sv.alpha = snapAlpha
+        sv.alpha = snapAlpha.coerceIn(0f, 1f)
         sv.scaleX = scale
         sv.scaleY = scale
         if (Build.VERSION.SDK_INT >= 31) {
-            val sb = ((70f * smooth((u / 0.5f).coerceIn(0f, 1f))) / 2f).roundToInt() * 2
+            val sb = (snapBlur / 2f).roundToInt() * 2
             if (sb != lastSnapBlur) {
                 lastSnapBlur = sb
                 sv.setRenderEffect(
@@ -391,14 +458,11 @@ class FoldOverlayService : Service(), SensorEventListener {
             }
         }
 
-        // 2) Frosted glass, strongest in the middle of the fold
-        val bump = sin(PI * u).toFloat().coerceAtLeast(0f)
         val blurOk = blurAvailable()
-        fv.alpha = (if (blurOk) 0.22f else 0.45f) * bump * f
+        fv.alpha = (if (blurOk) frost else frost * 2f).coerceIn(0f, 0.6f)
 
-        // 3) Blur of the real screen underneath, which sharpens again at the end
         if (blurOk) {
-            val rad = ((Prefs.maxBlur(this) * bump.pow(0.6f) * f) / 2f).roundToInt() * 2
+            val rad = (behindBlur / 2f).roundToInt() * 2
             if (rad != lastBlur) {
                 lastBlur = rad
                 p.blurBehindRadius = rad

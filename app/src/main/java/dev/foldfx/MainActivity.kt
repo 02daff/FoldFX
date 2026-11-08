@@ -36,6 +36,13 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var angleText: TextView
     private lateinit var statusText: TextView
     private lateinit var blurLabel: TextView
+    private lateinit var logText: TextView
+    private val logUpdater = object : Runnable {
+        override fun run() {
+            logText.text = FoldOverlayService.logText().ifEmpty { "(nothing yet)" }
+            handler.postDelayed(this, 500)
+        }
+    }
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -111,6 +118,25 @@ class MainActivity : Activity(), SensorEventListener {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         })
 
+        col.addView(TextView(this).apply {
+            text = "Event log (do a full close + open, then share this)"
+            textSize = 16f
+            setPadding(0, pad, 0, dp(4))
+        })
+        col.addView(button("Share log") {
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, FoldOverlayService.logText())
+            }
+            startActivity(Intent.createChooser(send, "Share FoldFX log"))
+        })
+        logText = TextView(this).apply {
+            textSize = 12f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(0, dp(8), 0, pad)
+        }
+        col.addView(logText)
+
         setContentView(ScrollView(this).apply { addView(col) })
 
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -143,6 +169,7 @@ class MainActivity : Activity(), SensorEventListener {
             getSystemService(WindowManager::class.java).addCrossWindowBlurEnabledListener(mainExecutor, blurListener)
         }
         hinge?.let { sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        handler.post(logUpdater)
         refresh()
     }
 
@@ -152,6 +179,7 @@ class MainActivity : Activity(), SensorEventListener {
             getSystemService(WindowManager::class.java).removeCrossWindowBlurEnabledListener(blurListener)
         }
         sensors.unregisterListener(this)
+        handler.removeCallbacks(logUpdater)
     }
 
     override fun onSensorChanged(event: SensorEvent) {
