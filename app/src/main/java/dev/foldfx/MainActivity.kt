@@ -32,6 +32,7 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var statusText: TextView
     private lateinit var blurLabel: TextView
     private lateinit var logText: TextView
+    private lateinit var halfButton: Button
     private val logUpdater = object : Runnable {
         override fun run() {
             logText.text = FoldOverlayService.logText().ifEmpty { "(nothing yet)" }
@@ -84,6 +85,12 @@ class MainActivity : Activity(), SensorEventListener {
             )
             handler.postDelayed({ refresh() }, 400)
         })
+
+        halfButton = button("") {
+            Prefs.setMovingHalfLeft(this, !Prefs.movingHalfLeft(this))
+            refresh()
+        }
+        col.addView(halfButton)
 
         col.addView(button("Open Developer options (blur setting)") {
             runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }
@@ -187,6 +194,7 @@ class MainActivity : Activity(), SensorEventListener {
             append("\nFold the phone slowly and watch the angle above. It should change smoothly.")
         }
         blurLabel.text = "Max blur: ${Prefs.maxBlur(this)} px"
+        halfButton.text = "Half that swings: " + (if (Prefs.movingHalfLeft(this)) "left" else "right") + " (tap to change)"
     }
 
     private fun button(label: String, onClick: () -> Unit) = Button(this).apply {

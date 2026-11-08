@@ -12,4 +12,12 @@ object Prefs {
     fun setMaxBlur(c: Context, value: Int) {
         c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("blur2", value).apply()
     }
+
+    /** Which half of the big screen swings when you fold. */
+    fun movingHalfLeft(c: Context): Boolean =
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean("left", true)
+
+    fun setMovingHalfLeft(c: Context, value: Boolean) {
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean("left", value).apply()
+    }
 }

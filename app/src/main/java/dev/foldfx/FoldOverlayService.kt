@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -21,18 +22,23 @@ import android.provider.Settings
 import android.view.Choreographer
 import android.view.Display
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import kotlin.math.abs
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /**
- * Fold animation without screen capture.
+ * iPhone Duo-style fold effect, no screen capture.
  *
- * Folding: the real screen blurs (window blur) and frosts more the further you fold.
- * Screen switch:
- *  - opening (cover -> big screen): a frosted, cover-shaped glass card appears in the middle of
- *    the blurred big screen, grows to fill it and melts away while the screen sharpens.
- *  - closing (big screen -> cover): the cover screen starts blurred/frosted and sharpens.
+ * Big screen: only the half that swings is affected. It turns dark and blurred (smoked glass),
+ * a bit stronger toward its outer edge, and clears as the phone comes flat. Driven directly by
+ * the hinge angle.
+ *
+ * Cover screen (right after closing): it starts blurred and dim, and the sharpness sweeps from
+ * the hinge side to the outer edge.
+ *
+ * The varying blur is made from several thin vertical overlay strips, each with its own blur.
  */
 class FoldOverlayService : Service(), SensorEventListener, DisplayManager.DisplayListener {
 
@@ -57,11 +63,18 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         fun logText(): String = synchronized(logLines) { logLines.joinToString("\n") }
 
         private const val CHANNEL = "foldfx"
-        private const val STOP_MS = 700L            // a pause this long ends the effect
-        private const val START_THRESHOLD = 10f     // degrees of movement that start the effect
-        private const val OPEN_END = 172f           // counts as fully open
-        private const val DISSOLVE_MS = 520f        // transition after the screen switch
-        private const val PREVIEW_MS = 1600L
+        private const val STRIPS = 8
+        private const val FULL_EFFECT_AT = 40f      // effect is at full strength 40° away from flat
+        private const val IDLE_FADE_MS = 1200L      // held still half-open this long -> fade out
+        private const val COVER_SWEEP_MS = 650f     // cover screen sharpening sweep
+        private const val PREVIEW_MS = 2200L
+    }
+
+    private class Strip(val view: View, val params: WindowManager.LayoutParams) {
+        var blur = -1
+        var dim = -1f
+        var x = -1
+        var w = -1
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -70,29 +83,20 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private lateinit var displays: DisplayManager
     private var hinge: Sensor? = null
 
-    // overlay
-    private var glass: GlassView? = null
-    private var params: WindowManager.LayoutParams? = null
-    private var lastBlur = -1
+    private val strips = ArrayList<Strip>()
 
-    // motion / screens
     private var animating = false
+    private var frameRunning = false
     private var hasReading = false
-    private var restAngle = 180f
     private var targetAngle = 180f
     private var shownAngle = 180f
-    private var startAngle = 180f
     private var lastMoveAt = 0L
-    private var fade = 0f
-    private var frameRunning = false
+    private var fade = 1f
     private var preview = false
-    private var animStartAt = 0L
-    private var switchedAt = 0L
-    private var toInner = false
-    private var waitForRest = false
+    private var previewStart = 0L
+    private var coverSweepAt = 0L
     private var screenW = 0
     private var screenH = 0
-    private var coverAspect = 1140f / 2616f
 
     private val frame = Choreographer.FrameCallback { tick() }
 
@@ -101,7 +105,6 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     override fun onCreate() {
         super.onCreate()
         startAsForeground()
-
         wm = getSystemService(WindowManager::class.java)
         sensors = getSystemService(SensorManager::class.java)
         displays = getSystemService(DisplayManager::class.java)
@@ -112,16 +115,19 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             return
         }
         currentSize().let { screenW = it.first; screenH = it.second }
-        if (isCover(screenW, screenH)) coverAspect = screenW.toFloat() / screenH
-
         sensors.registerListener(this, hinge, SensorManager.SENSOR_DELAY_FASTEST)
         displays.registerDisplayListener(this, main)
         running = true
-        log("service started, screen ${screenW}x$screenH")
+        log("service started, screen ${screenW}x$screenH, blur ${if (blurAvailable()) "on" else "OFF"}")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_PREVIEW) startPreview()
+        if (intent?.action == ACTION_PREVIEW) {
+            preview = true
+            previewStart = SystemClock.uptimeMillis()
+            log("preview")
+            begin()
+        }
         return START_STICKY
     }
 
@@ -131,7 +137,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         if (::displays.isInitialized) displays.unregisterDisplayListener(this)
         Choreographer.getInstance().removeFrameCallback(frame)
         frameRunning = false
-        detach()
+        removeStrips()
         super.onDestroy()
     }
 
@@ -142,49 +148,33 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
     private fun isCover(w: Int, h: Int) = w < h * 0.75f
 
-    // =====================================================================
-    // Hinge sensor
-    // =====================================================================
+    // ---- hinge ----
 
     override fun onSensorChanged(event: SensorEvent) {
         val a = event.values[0].coerceIn(0f, 180f)
         val now = SystemClock.uptimeMillis()
         if (!hasReading) {
             hasReading = true
-            restAngle = a; targetAngle = a; shownAngle = a
+            targetAngle = a; shownAngle = a
             log("hinge at ${a.roundToInt()}°")
             return
         }
-        val prevMoveAt = lastMoveAt
-        if (abs(a - targetAngle) > 0.5f) lastMoveAt = now
+        if (abs(a - targetAngle) > 0.5f) {
+            lastMoveAt = now
+            if (!animating && !isCover(screenW, screenH) && a < 177f) {
+                log("folding from ${targetAngle.roundToInt()}°")
+                begin()
+            }
+        }
         targetAngle = a
-
-        if (animating || preview) return
-
-        // After a screen-switch animation, wait until the hinge settles before starting another
-        if (waitForRest) {
-            restAngle = a
-            if (now - prevMoveAt > STOP_MS || a >= OPEN_END || a <= 5f) waitForRest = false
-            return
-        }
-
-        if (abs(a - restAngle) > START_THRESHOLD) {
-            log("fold started at ${restAngle.roundToInt()}° (now ${a.roundToInt()}°)")
-            startAngle = restAngle
-            shownAngle = restAngle
-            begin()
-        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    // =====================================================================
-    // Screen switch (cover <-> inner)
-    // =====================================================================
+    // ---- screen switch ----
 
     override fun onDisplayAdded(displayId: Int) {}
     override fun onDisplayRemoved(displayId: Int) {}
-
     override fun onDisplayChanged(displayId: Int) {
         if (displayId == Display.DEFAULT_DISPLAY) checkScreenSwitch()
     }
@@ -192,143 +182,96 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private fun checkScreenSwitch() {
         val (w, h) = currentSize()
         if (w == screenW && h == screenH) return
-        val fromCover = isCover(screenW, screenH)
+        val wasCover = isCover(screenW, screenH)
         val nowCover = isCover(w, h)
         screenW = w; screenH = h
-        if (nowCover) coverAspect = w.toFloat() / h
-        if (fromCover == nowCover) return   // rotation etc., not a fold switch
-
-        log("switched to ${if (nowCover) "cover" else "inner"} screen ${w}x$h at ${targetAngle.roundToInt()}°")
-        if (!animating) {
-            // The big screen often turns on before a fold gesture is detected: animate anyway
-            startAngle = targetAngle
+        if (wasCover == nowCover) return
+        log("switched to ${if (nowCover) "cover" else "big"} screen at ${targetAngle.roundToInt()}°")
+        removeStrips()   // re-create strips for the new screen size
+        if (nowCover) {
+            coverSweepAt = SystemClock.uptimeMillis()
+            begin()
+        } else {
+            coverSweepAt = 0L
+            lastMoveAt = SystemClock.uptimeMillis()
             shownAngle = targetAngle
             begin()
         }
-        if (switchedAt == 0L) {
-            switchedAt = SystemClock.uptimeMillis()
-            toInner = !nowCover
-        }
     }
 
-    // =====================================================================
-    // Animation
-    // =====================================================================
-
-    private fun startPreview() {
-        if (animating) return
-        preview = true
-        startAngle = 10f
-        shownAngle = 10f
-        begin()
-    }
+    // ---- animation ----
 
     private fun begin() {
         animating = true
-        animStartAt = SystemClock.uptimeMillis()
         fade = 1f
-        switchedAt = 0L
-        toInner = false
-        attach()
-        log(if (glass != null) "overlay shown" else "overlay FAILED to show")
         if (!frameRunning) {
             frameRunning = true
             Choreographer.getInstance().postFrameCallback(frame)
         }
     }
 
+    private fun finish() {
+        log("effect ended")
+        animating = false
+        frameRunning = false
+        preview = false
+        coverSweepAt = 0L
+        removeStrips()
+    }
+
     private fun tick() {
         val now = SystemClock.uptimeMillis()
-        checkScreenSwitch()   // in case the display callback is late
+        checkScreenSwitch()
+        val cover = isCover(screenW, screenH)
+        val movingLeft = Prefs.movingHalfLeft(this)
+        val maxBlur = Prefs.maxBlur(this).toFloat()
 
-        val moving: Boolean
-        if (preview) {
-            val e = (now - animStartAt).toFloat()
-            val k = (e / PREVIEW_MS).coerceIn(0f, 1f)
-            shownAngle = startAngle + (180f - startAngle) * smooth(k)
-            if (switchedAt == 0L && k >= 0.5f) {
-                switchedAt = now
-                toInner = true
-            }
-            moving = e < PREVIEW_MS
-        } else {
-            shownAngle += (targetAngle - shownAngle) * 0.35f
-            moving = now - lastMoveAt < STOP_MS
-        }
-
-        val opening = startAngle < 90f
-        val endAngle = if (opening) 180f else 0f
-        val span = abs(endAngle - startAngle).coerceAtLeast(20f)
-        val u = (abs(shownAngle - startAngle) / span).coerceIn(0f, 1f)
-
+        val blur = FloatArray(STRIPS)
+        val dim = FloatArray(STRIPS)
         val done: Boolean
-        if (switchedAt > 0L) {
-            val k = ((now - switchedAt) / DISSOLVE_MS).coerceIn(0f, 1f)
-            renderAfterSwitch(k)
-            done = k >= 1f
+
+        if (cover) {
+            // Cover screen: sharpen with a sweep from the hinge side outward
+            if (coverSweepAt == 0L) { finish(); return }
+            val t = (now - coverSweepAt) / COVER_SWEEP_MS
+            for (i in 0 until STRIPS) {
+                val x = (i + 0.5f) / STRIPS                 // 0 = hinge side, 1 = outer edge
+                val k = smooth(((t - 0.55f * x) / 0.45f).coerceIn(0f, 1f))
+                blur[i] = maxBlur * 0.8f * (1f - k)
+                dim[i] = 0.30f * (1f - k)
+            }
+            done = t >= 1f
         } else {
-            val reachedEnd = opening && shownAngle >= OPEN_END
-            if (!moving || reachedEnd) fade += (0f - fade) * 0.3f
-            renderBeforeSwitch(u, fade)
-            done = (!moving || reachedEnd) && fade < 0.01f
+            val angle: Float
+            if (preview) {
+                // Fake a fold: 180 -> 70 -> 180
+                val e = (now - previewStart).toFloat() / PREVIEW_MS
+                val tri = if (e < 0.5f) e * 2f else (1f - e) * 2f
+                angle = 180f - 110f * smooth(tri.coerceIn(0f, 1f))
+                shownAngle = angle
+            } else {
+                shownAngle += (targetAngle - shownAngle) * 0.4f
+                angle = shownAngle
+            }
+            val still = !preview && now - lastMoveAt > IDLE_FADE_MS
+            if (still) fade += (0f - fade) * 0.15f
+
+            val strength = smooth(((180f - angle) / FULL_EFFECT_AT).coerceIn(0f, 1f)) * fade
+            for (i in 0 until STRIPS) {
+                val x = (i + 0.5f) / STRIPS                 // 0 = at hinge, 1 = outer edge
+                blur[i] = maxBlur * strength * (0.45f + 0.55f * x.pow(1.5f))
+                dim[i] = 0.62f * strength * (0.6f + 0.4f * x)
+            }
+            done = if (preview) now - previewStart >= PREVIEW_MS
+            else (180f - angle < 1.5f && abs(targetAngle - shownAngle) < 0.5f) || (still && fade < 0.02f)
         }
 
         if (done) {
-            log("animation finished")
             finish()
-        } else {
-            Choreographer.getInstance().postFrameCallback(frame)
+            return
         }
-    }
-
-    private fun finish() {
-        frameRunning = false
-        waitForRest = switchedAt > 0L
-        detach()
-        animating = false
-        preview = false
-        restAngle = targetAngle
-        switchedAt = 0L
-    }
-
-    /** u: how far through the fold (0..1). f: fade-out when you stop moving. */
-    private fun renderBeforeSwitch(u: Float, f: Float) {
-        val e = smooth((u / 0.45f).coerceIn(0f, 1f))
-        applyLook(glassStrength = 0.6f * e * f, shape = 1f, blur = Prefs.maxBlur(this) * e * f)
-    }
-
-    /** k: 0 right at the switch, 1 when the transition is complete. */
-    private fun renderAfterSwitch(k: Float) {
-        val s = smooth(k)
-        if (toInner) {
-            // Cover-shaped glass card grows to fill the big screen and melts away
-            val melt = 1f - smooth(((k - 0.25f) / 0.75f).coerceIn(0f, 1f))
-            applyLook(glassStrength = melt, shape = s, blur = Prefs.maxBlur(this) * (1f - s))
-        } else {
-            // Cover screen starts frosted and sharpens
-            applyLook(glassStrength = 0.6f * (1f - s), shape = 1f, blur = Prefs.maxBlur(this) * (1f - s))
-        }
-    }
-
-    private fun applyLook(glassStrength: Float, shape: Float, blur: Float) {
-        val g = glass ?: return
-        val p = params ?: return
-
-        g.coverAspect = coverAspect
-        g.strength = if (blurAvailable()) glassStrength else (glassStrength * 1.6f).coerceAtMost(1f)
-        g.shape = shape
-        g.invalidate()
-
-        if (blurAvailable()) {
-            val rad = (blur / 2f).roundToInt() * 2
-            if (rad != lastBlur) {
-                lastBlur = rad
-                p.blurBehindRadius = rad
-                p.flags = if (rad > 0) p.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                else p.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
-                runCatching { wm.updateViewLayout(g, p) }
-            }
-        }
+        renderStrips(cover, movingLeft, blur, dim)
+        Choreographer.getInstance().postFrameCallback(frame)
     }
 
     private fun smooth(x: Float): Float {
@@ -336,54 +279,101 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         return t * t * (3f - 2f * t)
     }
 
+    // ---- strips (overlay windows) ----
+
+    /**
+     * Strip 0 is next to the hinge, the last strip at the outer edge.
+     * Big screen: strips cover the moving half. Cover screen: strips cover the whole screen,
+     * with the hinge on the side opposite the moving half's outer edge.
+     */
+    private fun renderStrips(cover: Boolean, movingLeft: Boolean, blur: FloatArray, dim: FloatArray) {
+        if (strips.isEmpty() && !createStrips()) return
+        val w = screenW
+        val regionStart: Int
+        val regionW: Int
+        val hingeOnRight: Boolean
+        if (cover) {
+            regionStart = 0; regionW = w
+            hingeOnRight = movingLeft          // cover sits on the moving panel; its hinge edge faces the other way
+        } else {
+            regionW = w / 2
+            regionStart = if (movingLeft) 0 else w / 2
+            hingeOnRight = movingLeft          // left half moving -> hinge is on its right
+        }
+        val sw = regionW.toFloat() / STRIPS
+        val blurOk = blurAvailable()
+
+        for (i in 0 until STRIPS) {
+            val s = strips[i]
+            // position: i counts outward from the hinge
+            val slot = if (hingeOnRight) STRIPS - 1 - i else i
+            val x0 = (regionStart + slot * sw).roundToInt()
+            val x1 = (regionStart + (slot + 1) * sw).roundToInt()
+            var changed = false
+            if (x0 != s.x || x1 - x0 != s.w) {
+                s.x = x0; s.w = x1 - x0
+                s.params.x = x0; s.params.width = (x1 - x0).coerceAtLeast(1)
+                changed = true
+            }
+            val d = if (blurOk) dim[i] else (dim[i] * 1.3f).coerceAtMost(0.85f)
+            if (abs(d - s.dim) > 0.004f) {
+                s.dim = d
+                s.view.setBackgroundColor(Color.argb((d * 255).roundToInt().coerceIn(0, 255), 0, 0, 0))
+            }
+            if (blurOk) {
+                val r = (blur[i] / 2f).roundToInt() * 2
+                if (r != s.blur) {
+                    s.blur = r
+                    s.params.blurBehindRadius = r
+                    s.params.flags = if (r > 0) s.params.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                    else s.params.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
+                    changed = true
+                }
+            }
+            if (changed) runCatching { wm.updateViewLayout(s.view, s.params) }
+        }
+    }
+
+    private fun createStrips(): Boolean {
+        if (!Settings.canDrawOverlays(this)) return false
+        for (i in 0 until STRIPS) {
+            val v = View(this)
+            val p = WindowManager.LayoutParams(
+                1,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                alpha = 0.8f   // Android blocks touches under untrusted overlays more opaque than 0.8
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                fitInsetsTypes = 0
+                gravity = Gravity.TOP or Gravity.LEFT
+            }
+            try {
+                wm.addView(v, p)
+                strips.add(Strip(v, p))
+            } catch (e: Exception) {
+                log("overlay FAILED: ${e.javaClass.simpleName}")
+                removeStrips()
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun removeStrips() {
+        for (s in strips) runCatching { wm.removeView(s.view) }
+        strips.clear()
+    }
+
     private fun blurAvailable(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wm.isCrossWindowBlurEnabled
 
-    // =====================================================================
-    // Overlay window
-    // =====================================================================
-
-    private fun attach() {
-        if (glass != null) return
-        if (!Settings.canDrawOverlays(this)) return
-
-        val g = GlassView(this)
-        val p = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            // Android blocks touches under untrusted overlays more opaque than 0.8
-            alpha = 0.8f
-            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            fitInsetsTypes = 0
-            gravity = Gravity.TOP or Gravity.LEFT
-        }
-        try {
-            wm.addView(g, p)
-            glass = g
-            params = p
-            lastBlur = -1
-        } catch (e: Exception) {
-            glass = null
-        }
-    }
-
-    private fun detach() {
-        glass?.let { runCatching { wm.removeView(it) } }
-        glass = null
-        params = null
-        lastBlur = -1
-    }
-
-    // =====================================================================
-    // Foreground notification
-    // =====================================================================
+    // ---- foreground notification ----
 
     private fun startAsForeground() {
         val nm = getSystemService(NotificationManager::class.java)
