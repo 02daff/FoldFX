@@ -84,6 +84,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private var hinge: Sensor? = null
 
     private val strips = ArrayList<Strip>()
+    private var panel: ProjectionPanel? = null
+    private var panelParams: WindowManager.LayoutParams? = null
 
     private var animating = false
     private var frameRunning = false
@@ -138,6 +140,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         Choreographer.getInstance().removeFrameCallback(frame)
         frameRunning = false
         removeStrips()
+        removePanel()
         super.onDestroy()
     }
 
@@ -187,7 +190,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         screenW = w; screenH = h
         if (wasCover == nowCover) return
         log("switched to ${if (nowCover) "cover" else "big"} screen at ${targetAngle.roundToInt()}°")
-        removeStrips()   // re-create strips for the new screen size
+        removeStrips()   // re-create overlays for the new screen size
+        removePanel()
         if (nowCover) {
             coverSweepAt = SystemClock.uptimeMillis()
             begin()
@@ -217,6 +221,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         preview = false
         coverSweepAt = 0L
         removeStrips()
+        removePanel()
     }
 
     private fun tick() {
@@ -256,21 +261,30 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             val still = !preview && now - lastMoveAt > IDLE_FADE_MS
             if (still) fade += (0f - fade) * 0.15f
 
-            val strength = smooth(((180f - angle) / FULL_EFFECT_AT).coerceIn(0f, 1f)) * fade
+            // fold = how far the swinging half has turned away from flat
+            val fold = (180f - angle).coerceIn(0f, 179f)
+            val strength = smooth((fold / 90f).coerceIn(0f, 1f)) * fade      // blur/dark grow as it closes
+            val appear = smooth((fold / 20f).coerceIn(0f, 1f)) * fade        // projection fades in off flat
             for (i in 0 until STRIPS) {
                 val x = (i + 0.5f) / STRIPS                 // 0 = at hinge, 1 = outer edge
-                blur[i] = maxBlur * strength * (0.45f + 0.55f * x.pow(1.5f))
-                dim[i] = 0.62f * strength * (0.6f + 0.4f * x)
+                blur[i] = maxBlur * strength * (0.15f + 0.85f * x * x)
+                dim[i] = 0.65f * strength * (0.35f + 0.65f * x)
             }
             done = if (preview) now - previewStart >= PREVIEW_MS
-            else (180f - angle < 1.5f && abs(targetAngle - shownAngle) < 0.5f) || (still && fade < 0.02f)
+            else (fold < 1.5f && abs(targetAngle - shownAngle) < 0.5f) || (still && fade < 0.02f)
+
+            if (!done) {
+                renderPanel(movingLeft, fold, appear, blur, dim)
+                Choreographer.getInstance().postFrameCallback(frame)
+                return
+            }
         }
 
         if (done) {
             finish()
             return
         }
-        renderStrips(cover, movingLeft, blur, dim)
+        renderStrips(true, movingLeft, blur, dim)
         Choreographer.getInstance().postFrameCallback(frame)
     }
 
@@ -368,6 +382,55 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private fun removeStrips() {
         for (s in strips) runCatching { wm.removeView(s.view) }
         strips.clear()
+    }
+
+    // ---- projection panel (big screen, swinging half) ----
+
+    private fun renderPanel(movingLeft: Boolean, fold: Float, appear: Float, blur: FloatArray, dim: FloatArray) {
+        val half = screenW / 2
+        var p = panel
+        var lp = panelParams
+        if (p == null || lp == null) {
+            if (!Settings.canDrawOverlays(this)) return
+            p = ProjectionPanel(this, STRIPS)
+            lp = WindowManager.LayoutParams(
+                half,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                alpha = 0.8f   // Android blocks touches under untrusted overlays more opaque than 0.8
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                fitInsetsTypes = 0
+                gravity = Gravity.TOP or Gravity.LEFT
+                x = if (movingLeft) 0 else screenW - half
+                y = 0
+            }
+            try {
+                wm.addView(p, lp)
+                panel = p
+                panelParams = lp
+                log("projection shown")
+            } catch (e: Exception) {
+                log("projection FAILED: ${e.javaClass.simpleName}")
+                return
+            }
+        }
+        p.screenW = screenW
+        p.screenH = screenH
+        p.movingLeft = movingLeft
+        p.alpha = appear
+        p.update(fold, blur, dim)
+    }
+
+    private fun removePanel() {
+        panel?.let { runCatching { wm.removeView(it) } }
+        panel = null
+        panelParams = null
     }
 
     private fun blurAvailable(): Boolean =
