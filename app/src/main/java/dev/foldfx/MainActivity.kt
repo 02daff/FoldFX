@@ -8,6 +8,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -21,15 +22,19 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
 
 class MainActivity : Activity(), SensorEventListener {
+
+    companion object {
+        private const val REQ_CAPTURE = 42
+    }
 
     private lateinit var sensors: SensorManager
     private var hinge: Sensor? = null
 
     private lateinit var angleText: TextView
     private lateinit var statusText: TextView
-    private lateinit var sideButton: Button
     private lateinit var blurLabel: TextView
 
     private val handler = Handler(Looper.getMainLooper())
@@ -66,12 +71,12 @@ class MainActivity : Activity(), SensorEventListener {
             )
         })
 
-        col.addView(button("2. Start fold animation") {
-            startForegroundService(Intent(this, FoldOverlayService::class.java))
-            handler.postDelayed({ refresh() }, 400)
+        col.addView(button("2. Start fold animation (choose \"Entire screen\")") {
+            val mpm = getSystemService(MediaProjectionManager::class.java)
+            startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE)
         })
 
-        col.addView(button("Test effect (4 seconds, no folding needed)") {
+        col.addView(button("Test effect (no folding needed)") {
             startForegroundService(
                 Intent(this, FoldOverlayService::class.java).setAction(FoldOverlayService.ACTION_PREVIEW)
             )
@@ -86,15 +91,6 @@ class MainActivity : Activity(), SensorEventListener {
             stopService(Intent(this, FoldOverlayService::class.java))
             handler.postDelayed({ refresh() }, 400)
         })
-
-        sideButton = button("") {
-            Prefs.setMovingSideRight(this, !Prefs.movingSideRight(this))
-            if (FoldOverlayService.running) {
-                startForegroundService(Intent(this, FoldOverlayService::class.java))
-            }
-            refresh()
-        }
-        col.addView(sideButton)
 
         blurLabel = TextView(this).apply { setPadding(0, pad, 0, 0) }
         col.addView(blurLabel)
@@ -122,6 +118,21 @@ class MainActivity : Activity(), SensorEventListener {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_CAPTURE) return
+        val i = Intent(this, FoldOverlayService::class.java)
+        if (resultCode == RESULT_OK && data != null) {
+            i.putExtra(FoldOverlayService.EXTRA_CODE, resultCode)
+            i.putExtra(FoldOverlayService.EXTRA_DATA, data)
+        } else {
+            Toast.makeText(this, "No screen capture: running with blur only", Toast.LENGTH_LONG).show()
+        }
+        startForegroundService(i)
+        handler.postDelayed({ refresh() }, 600)
     }
 
     private val blurListener = java.util.function.Consumer<Boolean> { refresh() }
@@ -165,9 +176,9 @@ class MainActivity : Activity(), SensorEventListener {
                 else -> "OFF. Turn off Battery saver / power saving, and in Developer options enable \"Allow window-level blurs\". Frost-only until then."
             })
             appendLine("Animation service: " + if (FoldOverlayService.running) "running" else "stopped")
+            appendLine("Screen snapshot: " + if (FoldOverlayService.captureActive) "ON" else "off (blur only). Tap Start and allow screen capture")
             append("\nFold the phone slowly and watch the angle above. It should change smoothly.")
         }
-        sideButton.text = "Moving half: " + (if (Prefs.movingSideRight(this)) "right" else "left") + " (tap to flip)"
         blurLabel.text = "Max blur: ${Prefs.maxBlur(this)} px"
     }
 

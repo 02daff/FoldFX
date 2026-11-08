@@ -1,68 +1,123 @@
 package dev.foldfx
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.Image
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.Choreographer
 import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /**
- * Listens to the hinge angle and, while the phone is moving between closed and open,
- * shows a full-screen, non-touchable overlay that blurs and frosts whatever is underneath.
+ * iPhone Duo-style fold animation.
+ *
+ * When the hinge starts moving, we grab one snapshot of the screen (MediaProjection),
+ * cover the screen with it, and as the fold progresses the snapshot zooms, blurs and
+ * dissolves through a frosted "glass" layer. The real screen underneath is blurred too and
+ * sharpens back into view as the phone reaches fully open/closed.
+ *
+ * Without screen-capture permission it falls back to blur + frost only.
  */
 class FoldOverlayService : Service(), SensorEventListener {
 
     companion object {
+        const val ACTION_PREVIEW = "dev.foldfx.PREVIEW"
+        const val EXTRA_CODE = "code"
+        const val EXTRA_DATA = "data"
+
         @Volatile var running = false
             private set
+        @Volatile var captureActive = false
+            private set
 
-        const val ACTION_PREVIEW = "dev.foldfx.PREVIEW"
         private const val CHANNEL = "foldfx"
-        private const val PREVIEW_MS = 4000L
-        private const val HOLD_MS = 450L      // how long after the last movement the effect stays
-        private const val MIN_ANGLE = 4f      // below this = closed
-        private const val MAX_ANGLE = 176f    // above this = open
+        private const val HOLD_MS = 450L            // effect lingers this long after movement stops
+        private const val START_THRESHOLD = 3f      // degrees of movement that start the effect
+        private const val SNAPSHOT_TIMEOUT_MS = 160L
+        private const val PREVIEW_MS = 1600L
     }
 
+    private enum class State { IDLE, CAPTURING, ANIMATING }
+
+    private val main = Handler(Looper.getMainLooper())
     private lateinit var wm: WindowManager
     private lateinit var sensors: SensorManager
     private var hinge: Sensor? = null
 
-    private var view: FoldEffectView? = null
-    private var params: WindowManager.LayoutParams? = null
+    // ---- capture ----
+    private var projection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var reader: ImageReader? = null
+    private var capW = 0
+    private var capH = 0
+    private var snapshot: Bitmap? = null
 
+    // ---- overlay ----
+    private var root: FrameLayout? = null
+    private var snapView: SnapshotView? = null
+    private var frostView: View? = null
+    private var params: WindowManager.LayoutParams? = null
+    private var lastBlur = -1
+    private var lastSnapBlur = -1
+
+    // ---- motion ----
+    private var state = State.IDLE
     private var hasReading = false
+    private var restAngle = 180f
     private var targetAngle = 180f
     private var shownAngle = 180f
+    private var startAngle = 180f
     private var lastMoveAt = 0L
     private var fade = 0f
     private var frameRunning = false
-    private var lastBlur = -1
-    private var previewUntil = 0L
-    private var movingSideRight = true
+    private var preview = false
+    private var animStartAt = 0L
 
     private val frame = Choreographer.FrameCallback { tick() }
+    private val snapshotTimeout = Runnable {
+        if (state == State.CAPTURING) {
+            pauseCapture()
+            beginAnimation()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        startAsForeground()
+        startAsForeground(withCapture = false)
 
         wm = getSystemService(WindowManager::class.java)
         sensors = getSystemService(SensorManager::class.java)
@@ -77,148 +132,311 @@ class FoldOverlayService : Service(), SensorEventListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        movingSideRight = Prefs.movingSideRight(this)
         if (intent?.action == ACTION_PREVIEW) {
-            previewUntil = SystemClock.uptimeMillis() + PREVIEW_MS
-            startFrames()
+            startPreview()
+            return START_NOT_STICKY
         }
-        return START_STICKY
+        val code = intent?.getIntExtra(EXTRA_CODE, 0) ?: 0
+        val data: Intent? = if (Build.VERSION.SDK_INT >= 33) {
+            intent?.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION") intent?.getParcelableExtra(EXTRA_DATA)
+        }
+        if (code == Activity.RESULT_OK && data != null) setupProjection(code, data)
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         running = false
         if (::sensors.isInitialized) sensors.unregisterListener(this)
         Choreographer.getInstance().removeFrameCallback(frame)
+        main.removeCallbacks(snapshotTimeout)
         frameRunning = false
         detach()
+        releaseCapture()
+        snapshot?.recycle()
+        snapshot = null
         super.onDestroy()
     }
 
-    // ---- Sensor ----
+    // =====================================================================
+    // Screen capture
+    // =====================================================================
+
+    private fun setupProjection(code: Int, data: Intent) {
+        releaseCapture()
+        startAsForeground(withCapture = true)   // must happen before getMediaProjection on Android 14+
+        val mpm = getSystemService(MediaProjectionManager::class.java)
+        val mp = runCatching { mpm.getMediaProjection(code, data) }.getOrNull() ?: return
+        mp.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                main.post { releaseCapture() }
+            }
+        }, main)
+        projection = mp
+
+        val (w, h) = captureSize()
+        val r = newReader(w, h)
+        virtualDisplay = runCatching {
+            mp.createVirtualDisplay(
+                "FoldFX", w, h, resources.displayMetrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                null,       // paused: no surface until we need a snapshot
+                null, main
+            )
+        }.getOrNull()
+        if (virtualDisplay == null) {
+            r.close()
+            reader = null
+        }
+        captureActive = virtualDisplay != null
+    }
+
+    private fun newReader(w: Int, h: Int): ImageReader {
+        val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        r.setOnImageAvailableListener({ onFrame(it) }, main)
+        reader = r
+        capW = w
+        capH = h
+        return r
+    }
+
+    private fun captureSize(): Pair<Int, Int> {
+        val b = wm.currentWindowMetrics.bounds
+        return Pair(b.width().coerceAtLeast(2), b.height().coerceAtLeast(2))
+    }
+
+    /** Turn the mirror on just long enough to grab one frame. */
+    private fun requestSnapshot() {
+        state = State.CAPTURING
+        val vd = virtualDisplay
+        if (vd == null) {
+            beginAnimation()
+            return
+        }
+        val (w, h) = captureSize()
+        if (w != capW || h != capH || reader == null) {
+            // Cover screen and inner screen have different sizes
+            val old = reader
+            val r = newReader(w, h)
+            vd.resize(w, h, resources.displayMetrics.densityDpi)
+            vd.surface = r.surface
+            old?.close()
+        } else {
+            vd.surface = reader!!.surface
+        }
+        main.postDelayed(snapshotTimeout, SNAPSHOT_TIMEOUT_MS)
+    }
+
+    private fun onFrame(r: ImageReader) {
+        val img = runCatching { r.acquireLatestImage() }.getOrNull() ?: return
+        try {
+            if (state == State.CAPTURING) {
+                main.removeCallbacks(snapshotTimeout)
+                snapshot?.recycle()
+                snapshot = runCatching { toBitmap(img) }.getOrNull()
+                pauseCapture()
+                beginAnimation()
+            }
+        } finally {
+            img.close()
+        }
+    }
+
+    private fun toBitmap(img: Image): Bitmap {
+        val plane = img.planes[0]
+        val pixelStride = plane.pixelStride
+        val rowPadding = plane.rowStride - pixelStride * img.width
+        val padded = Bitmap.createBitmap(
+            img.width + rowPadding / pixelStride, img.height, Bitmap.Config.ARGB_8888
+        )
+        padded.copyPixelsFromBuffer(plane.buffer)
+        if (rowPadding == 0) return padded
+        val cropped = Bitmap.createBitmap(padded, 0, 0, img.width, img.height)
+        padded.recycle()
+        return cropped
+    }
+
+    private fun pauseCapture() {
+        runCatching { virtualDisplay?.surface = null }
+    }
+
+    private fun releaseCapture() {
+        captureActive = false
+        runCatching { virtualDisplay?.release() }
+        virtualDisplay = null
+        runCatching { reader?.close() }
+        reader = null
+        val mp = projection
+        projection = null
+        runCatching { mp?.stop() }
+    }
+
+    // =====================================================================
+    // Hinge sensor
+    // =====================================================================
 
     override fun onSensorChanged(event: SensorEvent) {
         val a = event.values[0].coerceIn(0f, 180f)
+        val now = SystemClock.uptimeMillis()
         if (!hasReading) {
             hasReading = true
+            restAngle = a
             targetAngle = a
             shownAngle = a
             return
         }
-        if (abs(a - targetAngle) > 0.5f) lastMoveAt = SystemClock.uptimeMillis()
+        if (abs(a - targetAngle) > 0.5f) lastMoveAt = now
         targetAngle = a
-        if (SystemClock.uptimeMillis() - lastMoveAt < HOLD_MS) startFrames()
+
+        if (state == State.IDLE && !preview && abs(a - restAngle) > START_THRESHOLD) {
+            startAngle = restAngle
+            shownAngle = restAngle
+            lastMoveAt = now
+            requestSnapshot()
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    // ---- Animation loop ----
+    private fun startPreview() {
+        if (state != State.IDLE) return
+        preview = true
+        startAngle = 10f
+        shownAngle = 10f
+        requestSnapshot()
+    }
 
-    private fun startFrames() {
-        if (frameRunning) return
-        frameRunning = true
-        Choreographer.getInstance().postFrameCallback(frame)
+    // =====================================================================
+    // Animation
+    // =====================================================================
+
+    private fun beginAnimation() {
+        state = State.ANIMATING
+        animStartAt = SystemClock.uptimeMillis()
+        fade = 1f
+        attach()
+        snapView?.bitmap = snapshot
+        if (!frameRunning) {
+            frameRunning = true
+            Choreographer.getInstance().postFrameCallback(frame)
+        }
     }
 
     private fun tick() {
         val now = SystemClock.uptimeMillis()
 
-        val previewing = now < previewUntil
         val moving: Boolean
-        if (previewing) {
-            // Fake a fold going back and forth between 30° and 150°
-            val phase = ((now % 2000L) / 2000f)
-            val tri = if (phase < 0.5f) phase * 2f else (1f - phase) * 2f
-            shownAngle = 30f + 120f * tri
-            moving = true
+        if (preview) {
+            val e = (now - animStartAt).toFloat()
+            val k = (e / PREVIEW_MS).coerceIn(0f, 1f)
+            shownAngle = startAngle + (180f - startAngle) * smooth(k)
+            moving = e < PREVIEW_MS + 150
         } else {
-            // Smooth the sensor (it may report at a lower rate than the screen refreshes)
-            shownAngle += (targetAngle - shownAngle) * 0.3f
-            moving = now - lastMoveAt < HOLD_MS && shownAngle > MIN_ANGLE && shownAngle < MAX_ANGLE
+            shownAngle += (targetAngle - shownAngle) * 0.35f
+            moving = now - lastMoveAt < HOLD_MS
         }
-        val goal = if (moving) 1f else 0f
-        fade += (goal - fade) * (if (moving) 0.25f else 0.12f)
 
-        val t = (shownAngle / 180f).coerceIn(0f, 1f)
+        // Opening if we started mostly closed, closing if we started mostly open
+        val endAngle = if (startAngle < 90f) 180f else 0f
+        val span = abs(endAngle - startAngle).coerceAtLeast(20f)
+        val u = (abs(shownAngle - startAngle) / span).coerceIn(0f, 1f)
+        val reachedEnd = abs(shownAngle - endAngle) < 3f
 
-        render(t, fade)
+        if (!moving || reachedEnd) fade += (0f - fade) * 0.18f
 
-        val settled = !moving && fade < 0.01f && abs(targetAngle - shownAngle) < 0.5f
-        if (settled) {
-            fade = 0f
-            detach()
-            frameRunning = false
+        render(u, fade)
+
+        if ((!moving || reachedEnd) && fade < 0.01f) {
+            finish()
         } else {
             Choreographer.getInstance().postFrameCallback(frame)
         }
     }
 
-    private var lastX = -1
-    private var lastW = -1
+    private fun finish() {
+        frameRunning = false
+        detach()
+        state = State.IDLE
+        preview = false
+        restAngle = targetAngle
+        snapshot?.recycle()
+        snapshot = null
+    }
 
     /**
-     * The effect is a blurred "glass pane" covering part of the moving half.
-     * Closed (t=0): the whole moving panel is glass. As you open, the pane's edge sweeps
-     * from the hinge out to the far edge and the sharp screen is revealed behind it.
-     * Closing plays it in reverse.
+     * u: 0 = where the fold started, 1 = fully opened/closed.
+     * f: overall fade (1 while moving, eases to 0 at the end).
      */
-    private fun render(t: Float, strength: Float) {
-        if (strength < 0.003f && view == null) return
-        val v = attach() ?: return
+    private fun render(u: Float, f: Float) {
+        val sv = snapView ?: return
+        val fv = frostView ?: return
+        val r = root ?: return
         val p = params ?: return
 
-        val b = wm.currentWindowMetrics.bounds
-        val w = b.width()
-        val h = b.height()
-        val inner = w > h * 0.75f
-        val right = movingSideRight
-
-        val hingeX = if (inner) w / 2 else if (right) 0 else w
-        val edgeX = if (right) w else 0
-        val panelW = abs(edgeX - hingeX)
-
-        // How much of the panel is still glass: all of it up to ~45°, none at 180°
-        val raw = ((1f - t) / 0.75f).coerceIn(0f, 1f)
-        val coverage = raw * raw * (3f - 2f * raw)   // smoothstep
-        val paneW = (panelW * coverage).roundToInt().coerceAtLeast(1)
-        val x = if (edgeX > hingeX) edgeX - paneW else edgeX
-
-        v.strength = if (paneW > 2) strength else 0f
-        v.leadingEdgeLeft = edgeX > hingeX
-        v.blurActive = blurAvailable()
-        v.invalidate()
-
-        var changed = false
-        if (x != lastX || paneW != lastW) {
-            lastX = x; lastW = paneW
-            p.x = x
-            p.width = paneW
-            changed = true
-        }
-        if (blurAvailable()) {
-            val r = if (paneW > 2) ((strength * Prefs.maxBlur(this)) / 2f).roundToInt() * 2 else 0
-            if (r != lastBlur) {
-                lastBlur = r
-                p.blurBehindRadius = r
-                p.flags = if (r > 0) p.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                else p.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
-                changed = true
+        // 1) Snapshot: zooms slightly, blurs, and dissolves during the first ~60% of the fold
+        val snapAlpha = (1f - smooth((u / 0.6f).coerceIn(0f, 1f))) * f
+        val scale = 1f + 0.12f * smooth(u)
+        sv.alpha = snapAlpha
+        sv.scaleX = scale
+        sv.scaleY = scale
+        if (Build.VERSION.SDK_INT >= 31) {
+            val sb = ((70f * smooth((u / 0.5f).coerceIn(0f, 1f))) / 2f).roundToInt() * 2
+            if (sb != lastSnapBlur) {
+                lastSnapBlur = sb
+                sv.setRenderEffect(
+                    if (sb > 0) RenderEffect.createBlurEffect(sb.toFloat(), sb.toFloat(), Shader.TileMode.CLAMP)
+                    else null
+                )
             }
         }
-        if (changed) runCatching { wm.updateViewLayout(v, p) }
+
+        // 2) Frosted glass, strongest in the middle of the fold
+        val bump = sin(PI * u).toFloat().coerceAtLeast(0f)
+        val blurOk = blurAvailable()
+        fv.alpha = (if (blurOk) 0.22f else 0.45f) * bump * f
+
+        // 3) Blur of the real screen underneath, which sharpens again at the end
+        if (blurOk) {
+            val rad = ((Prefs.maxBlur(this) * bump.pow(0.6f) * f) / 2f).roundToInt() * 2
+            if (rad != lastBlur) {
+                lastBlur = rad
+                p.blurBehindRadius = rad
+                p.flags = if (rad > 0) p.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                else p.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
+                runCatching { wm.updateViewLayout(r, p) }
+            }
+        }
+    }
+
+    private fun smooth(x: Float): Float {
+        val t = x.coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
     }
 
     private fun blurAvailable(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wm.isCrossWindowBlurEnabled
 
-    // ---- Overlay window ----
+    // =====================================================================
+    // Overlay window
+    // =====================================================================
 
-    private fun attach(): FoldEffectView? {
-        view?.let { return it }
-        if (!Settings.canDrawOverlays(this)) return null
+    private fun attach() {
+        if (root != null) return
+        if (!Settings.canDrawOverlays(this)) return
 
-        val v = FoldEffectView(this)
+        val match = ViewGroup.LayoutParams.MATCH_PARENT
+        val sv = SnapshotView(this)
+        val fv = View(this).apply {
+            setBackgroundColor(Color.WHITE)
+            alpha = 0f
+        }
+        val r = FrameLayout(this).apply {
+            addView(sv, FrameLayout.LayoutParams(match, match))
+            addView(fv, FrameLayout.LayoutParams(match, match))
+        }
         val p = WindowManager.LayoutParams(
-            1,
+            WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -232,32 +450,36 @@ class FoldOverlayService : Service(), SensorEventListener {
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             fitInsetsTypes = 0
             gravity = Gravity.TOP or Gravity.LEFT
-            x = 0
-            y = 0
         }
-        return try {
-            wm.addView(v, p)
-            view = v
+        try {
+            wm.addView(r, p)
+            root = r
+            snapView = sv
+            frostView = fv
             params = p
             lastBlur = -1
-            lastX = -1
-            lastW = -1
-            v
+            lastSnapBlur = -1
         } catch (e: Exception) {
-            null
+            root = null
         }
     }
 
     private fun detach() {
-        view?.let { runCatching { wm.removeView(it) } }
-        view = null
+        root?.let { runCatching { wm.removeView(it) } }
+        snapView?.bitmap = null
+        root = null
+        snapView = null
+        frostView = null
         params = null
         lastBlur = -1
+        lastSnapBlur = -1
     }
 
-    // ---- Foreground notification ----
+    // =====================================================================
+    // Foreground notification
+    // =====================================================================
 
-    private fun startAsForeground() {
+    private fun startAsForeground(withCapture: Boolean) {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "Fold animation", NotificationManager.IMPORTANCE_MIN)
@@ -267,10 +489,13 @@ class FoldOverlayService : Service(), SensorEventListener {
             .setContentTitle("Fold animation is on")
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(1, n)
+        val type = when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                    (if (withCapture) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0)
+            withCapture -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            else -> 0
         }
+        if (type != 0) startForeground(1, n, type) else startForeground(1, n)
     }
 }
