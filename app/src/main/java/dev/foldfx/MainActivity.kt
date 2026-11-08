@@ -71,6 +71,17 @@ class MainActivity : Activity(), SensorEventListener {
             handler.postDelayed({ refresh() }, 400)
         })
 
+        col.addView(button("Test effect (4 seconds, no folding needed)") {
+            startForegroundService(
+                Intent(this, FoldOverlayService::class.java).setAction(FoldOverlayService.ACTION_PREVIEW)
+            )
+            handler.postDelayed({ refresh() }, 400)
+        })
+
+        col.addView(button("Open Developer options (blur setting)") {
+            runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }
+        })
+
         col.addView(button("Stop fold animation") {
             stopService(Intent(this, FoldOverlayService::class.java))
             handler.postDelayed({ refresh() }, 400)
@@ -113,14 +124,22 @@ class MainActivity : Activity(), SensorEventListener {
         }
     }
 
+    private val blurListener = java.util.function.Consumer<Boolean> { refresh() }
+
     override fun onResume() {
         super.onResume()
+        if (Build.VERSION.SDK_INT >= 31) {
+            getSystemService(WindowManager::class.java).addCrossWindowBlurEnabledListener(mainExecutor, blurListener)
+        }
         hinge?.let { sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         refresh()
     }
 
     override fun onPause() {
         super.onPause()
+        if (Build.VERSION.SDK_INT >= 31) {
+            getSystemService(WindowManager::class.java).removeCrossWindowBlurEnabledListener(blurListener)
+        }
         sensors.unregisterListener(this)
     }
 
@@ -140,7 +159,11 @@ class MainActivity : Activity(), SensorEventListener {
         statusText.text = buildString {
             appendLine("Hinge sensor: " + (hinge?.let { "found (${it.name})" } ?: "NOT FOUND, this won't work"))
             appendLine("Overlay permission: " + if (Settings.canDrawOverlays(this@MainActivity)) "granted" else "not granted")
-            appendLine("Background blur: " + if (blurOk) "supported" else "not available (frost only)")
+            appendLine("Background blur: " + when {
+                blurOk -> "ON"
+                Build.VERSION.SDK_INT < 31 -> "OFF (needs Android 12+)"
+                else -> "OFF. Turn off Battery saver / power saving, and in Developer options enable \"Allow window-level blurs\". Frost-only until then."
+            })
             appendLine("Animation service: " + if (FoldOverlayService.running) "running" else "stopped")
             append("\nFold the phone slowly and watch the angle above. It should change smoothly.")
         }

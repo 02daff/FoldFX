@@ -24,6 +24,8 @@ class FoldEffectView(context: Context) : View(context) {
     var progress = 0f
     /** Which half of the inner screen physically swings. Flip it in the app if it looks wrong. */
     var movingSideRight = true
+    /** When the system can't blur, draw a much stronger frost so the effect is still visible. */
+    var blurActive = true
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
@@ -37,8 +39,10 @@ class FoldEffectView(context: Context) : View(context) {
         // Inner screen of the N5 is almost square; the cover screen is tall and narrow.
         val isInnerScreen = w > h * 0.75f
 
+        val boost = if (blurActive) 1f else 1.8f
+
         // 1) Soft milky veil over everything
-        canvas.drawColor(Color.argb((k * 55).toInt(), 255, 255, 255))
+        canvas.drawColor(Color.argb((k * 55 * boost).toInt().coerceAtMost(200), 255, 255, 255))
 
         // 2) The moving panel (half of the inner screen, or the whole cover screen)
         val hingeX: Float
@@ -55,7 +59,7 @@ class FoldEffectView(context: Context) : View(context) {
 
         paint.shader = LinearGradient(
             hingeX, 0f, edgeX, 0f,
-            intArrayOf(white(k * 0.85f), white(k * 0.45f), white(k * 0.15f)),
+            intArrayOf(white(k * 0.85f * boost), white(k * 0.45f * boost), white(k * 0.15f * boost)),
             null, Shader.TileMode.CLAMP
         )
         canvas.drawRect(panelLeft, 0f, panelRight, h, paint)

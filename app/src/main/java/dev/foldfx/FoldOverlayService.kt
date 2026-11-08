@@ -33,7 +33,9 @@ class FoldOverlayService : Service(), SensorEventListener {
         @Volatile var running = false
             private set
 
+        const val ACTION_PREVIEW = "dev.foldfx.PREVIEW"
         private const val CHANNEL = "foldfx"
+        private const val PREVIEW_MS = 4000L
         private const val HOLD_MS = 450L      // how long after the last movement the effect stays
         private const val MIN_ANGLE = 4f      // below this = closed
         private const val MAX_ANGLE = 176f    // above this = open
@@ -53,6 +55,7 @@ class FoldOverlayService : Service(), SensorEventListener {
     private var fade = 0f
     private var frameRunning = false
     private var lastBlur = -1
+    private var previewUntil = 0L
 
     private val frame = Choreographer.FrameCallback { tick() }
 
@@ -76,6 +79,10 @@ class FoldOverlayService : Service(), SensorEventListener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         view?.movingSideRight = Prefs.movingSideRight(this)
+        if (intent?.action == ACTION_PREVIEW) {
+            previewUntil = SystemClock.uptimeMillis() + PREVIEW_MS
+            startFrames()
+        }
         return START_STICKY
     }
 
@@ -116,10 +123,19 @@ class FoldOverlayService : Service(), SensorEventListener {
     private fun tick() {
         val now = SystemClock.uptimeMillis()
 
-        // Smooth the sensor (it may report at a lower rate than the screen refreshes)
-        shownAngle += (targetAngle - shownAngle) * 0.3f
-
-        val moving = now - lastMoveAt < HOLD_MS && shownAngle > MIN_ANGLE && shownAngle < MAX_ANGLE
+        val previewing = now < previewUntil
+        val moving: Boolean
+        if (previewing) {
+            // Fake a fold going back and forth between 30° and 150°
+            val phase = ((now % 2000L) / 2000f)
+            val tri = if (phase < 0.5f) phase * 2f else (1f - phase) * 2f
+            shownAngle = 30f + 120f * tri
+            moving = true
+        } else {
+            // Smooth the sensor (it may report at a lower rate than the screen refreshes)
+            shownAngle += (targetAngle - shownAngle) * 0.3f
+            moving = now - lastMoveAt < HOLD_MS && shownAngle > MIN_ANGLE && shownAngle < MAX_ANGLE
+        }
         val goal = if (moving) 1f else 0f
         fade += (goal - fade) * (if (moving) 0.25f else 0.12f)
 
@@ -146,9 +162,10 @@ class FoldOverlayService : Service(), SensorEventListener {
 
         v.intensity = intensity
         v.progress = progress
+        v.blurActive = blurAvailable()
         v.invalidate()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wm.isCrossWindowBlurEnabled) {
+        if (blurAvailable()) {
             // Quantize to steps of 2px so we don't relayout the window every frame for nothing
             val r = ((intensity * Prefs.maxBlur(this)) / 2f).roundToInt() * 2
             if (r != lastBlur) {
@@ -160,6 +177,9 @@ class FoldOverlayService : Service(), SensorEventListener {
             }
         }
     }
+
+    private fun blurAvailable(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wm.isCrossWindowBlurEnabled
 
     // ---- Overlay window ----
 
