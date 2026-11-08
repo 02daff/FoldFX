@@ -31,7 +31,7 @@ class ProjectionPanel(context: Context, private val strips: Int) : FrameLayout(c
     /** true: the left half swings (hinge on this view's right edge). */
     var movingLeft = true
 
-    private val matrix = Matrix()
+    private val projMatrix = Matrix()
     private val src = FloatArray(8)
     private val dst = FloatArray(8)
     private val stripViews = ArrayList<StripView>()
@@ -106,7 +106,7 @@ class ProjectionPanel(context: Context, private val strips: Int) : FrameLayout(c
             dst[k * 2] = if (movingLeft) w - d else d
             dst[k * 2 + 1] = y
         }
-        matrix.setPolyToPoly(src, 0, dst, 0, 4)
+        projMatrix.setPolyToPoly(src, 0, dst, 0, 4)
     }
 
     private inner class StripView(context: Context) : View(context) {
@@ -131,7 +131,7 @@ class ProjectionPanel(context: Context, private val strips: Int) : FrameLayout(c
         override fun onDraw(canvas: Canvas) {
             canvas.save()
             canvas.translate(-left.toFloat(), 0f)    // into panel coordinates
-            canvas.concat(matrix)                     // into picture coordinates
+            canvas.concat(this@ProjectionPanel.projMatrix)   // into picture coordinates
             drawPlaceholderUi(canvas)
             canvas.restore()
             if (dim > 0.002f) canvas.drawColor(Color.argb((dim * 255).roundToInt().coerceIn(0, 255), 0, 0, 0))
