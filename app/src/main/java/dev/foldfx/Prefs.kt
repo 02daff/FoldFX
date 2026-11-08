@@ -12,11 +12,4 @@ object Prefs {
     fun setMaxBlur(c: Context, value: Int) {
         c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("blur2", value).apply()
     }
-
-    fun autoReenable(c: Context): Boolean =
-        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean("auto", false)
-
-    fun setAutoReenable(c: Context, value: Boolean) {
-        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean("auto", value).apply()
-    }
 }

@@ -4,7 +4,6 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.sensor.hinge_angle" android:required="false" />
@@ -24,17 +23,10 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".CaptureActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:taskAffinity=""
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-
         <service
             android:name=".FoldOverlayService"
             android:exported="false"
-            android:foregroundServiceType="specialUse|mediaProjection">
+            android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Visual fold/unfold animation overlay driven by the hinge sensor" />
