@@ -14,9 +14,9 @@ object Prefs {
 
     /** Max background blur in px (Android 12+ cross-window blur). */
     fun maxBlur(c: Context): Int =
-        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt("blur", 80)
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt("blur2", 120)
 
     fun setMaxBlur(c: Context, value: Int) {
-        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("blur", value).apply()
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("blur2", value).apply()
     }
 }

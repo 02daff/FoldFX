@@ -16,12 +16,10 @@ import android.os.IBinder
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.Choreographer
+import android.view.Gravity
 import android.view.WindowManager
-import kotlin.math.PI
 import kotlin.math.abs
-import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
 /**
  * Listens to the hinge angle and, while the phone is moving between closed and open,
@@ -56,6 +54,7 @@ class FoldOverlayService : Service(), SensorEventListener {
     private var frameRunning = false
     private var lastBlur = -1
     private var previewUntil = 0L
+    private var movingSideRight = true
 
     private val frame = Choreographer.FrameCallback { tick() }
 
@@ -78,7 +77,7 @@ class FoldOverlayService : Service(), SensorEventListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        view?.movingSideRight = Prefs.movingSideRight(this)
+        movingSideRight = Prefs.movingSideRight(this)
         if (intent?.action == ACTION_PREVIEW) {
             previewUntil = SystemClock.uptimeMillis() + PREVIEW_MS
             startFrames()
@@ -140,10 +139,8 @@ class FoldOverlayService : Service(), SensorEventListener {
         fade += (goal - fade) * (if (moving) 0.25f else 0.12f)
 
         val t = (shownAngle / 180f).coerceIn(0f, 1f)
-        // Strongest in the middle of the fold, nothing when fully open/closed
-        val intensity = sin(PI * t).toFloat().coerceAtLeast(0f).pow(0.6f) * fade
 
-        render(intensity, t)
+        render(t, fade)
 
         val settled = !moving && fade < 0.01f && abs(targetAngle - shownAngle) < 0.5f
         if (settled) {
@@ -155,27 +152,59 @@ class FoldOverlayService : Service(), SensorEventListener {
         }
     }
 
-    private fun render(intensity: Float, progress: Float) {
-        if (intensity < 0.003f && view == null) return
+    private var lastX = -1
+    private var lastW = -1
+
+    /**
+     * The effect is a blurred "glass pane" covering part of the moving half.
+     * Closed (t=0): the whole moving panel is glass. As you open, the pane's edge sweeps
+     * from the hinge out to the far edge and the sharp screen is revealed behind it.
+     * Closing plays it in reverse.
+     */
+    private fun render(t: Float, strength: Float) {
+        if (strength < 0.003f && view == null) return
         val v = attach() ?: return
         val p = params ?: return
 
-        v.intensity = intensity
-        v.progress = progress
+        val b = wm.currentWindowMetrics.bounds
+        val w = b.width()
+        val h = b.height()
+        val inner = w > h * 0.75f
+        val right = movingSideRight
+
+        val hingeX = if (inner) w / 2 else if (right) 0 else w
+        val edgeX = if (right) w else 0
+        val panelW = abs(edgeX - hingeX)
+
+        // How much of the panel is still glass: all of it up to ~45°, none at 180°
+        val raw = ((1f - t) / 0.75f).coerceIn(0f, 1f)
+        val coverage = raw * raw * (3f - 2f * raw)   // smoothstep
+        val paneW = (panelW * coverage).roundToInt().coerceAtLeast(1)
+        val x = if (edgeX > hingeX) edgeX - paneW else edgeX
+
+        v.strength = if (paneW > 2) strength else 0f
+        v.leadingEdgeLeft = edgeX > hingeX
         v.blurActive = blurAvailable()
         v.invalidate()
 
+        var changed = false
+        if (x != lastX || paneW != lastW) {
+            lastX = x; lastW = paneW
+            p.x = x
+            p.width = paneW
+            changed = true
+        }
         if (blurAvailable()) {
-            // Quantize to steps of 2px so we don't relayout the window every frame for nothing
-            val r = ((intensity * Prefs.maxBlur(this)) / 2f).roundToInt() * 2
+            val r = if (paneW > 2) ((strength * Prefs.maxBlur(this)) / 2f).roundToInt() * 2 else 0
             if (r != lastBlur) {
                 lastBlur = r
                 p.blurBehindRadius = r
                 p.flags = if (r > 0) p.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
                 else p.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
-                runCatching { wm.updateViewLayout(v, p) }
+                changed = true
             }
         }
+        if (changed) runCatching { wm.updateViewLayout(v, p) }
     }
 
     private fun blurAvailable(): Boolean =
@@ -187,9 +216,9 @@ class FoldOverlayService : Service(), SensorEventListener {
         view?.let { return it }
         if (!Settings.canDrawOverlays(this)) return null
 
-        val v = FoldEffectView(this).apply { movingSideRight = Prefs.movingSideRight(this@FoldOverlayService) }
+        val v = FoldEffectView(this)
         val p = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
+            1,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -202,12 +231,17 @@ class FoldOverlayService : Service(), SensorEventListener {
             alpha = 0.8f
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             fitInsetsTypes = 0
+            gravity = Gravity.TOP or Gravity.LEFT
+            x = 0
+            y = 0
         }
         return try {
             wm.addView(v, p)
             view = v
             params = p
             lastBlur = -1
+            lastX = -1
+            lastW = -1
             v
         } catch (e: Exception) {
             null
