@@ -103,6 +103,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private var openingFromCover = false
     private var switchedToInnerAt = 0L
     private var openingNow = false
+    private var wallpaperTried = false
     private var panel: ProjectionPanel? = null
     private var panelParams: WindowManager.LayoutParams? = null
 
@@ -156,6 +157,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        wallpaperTried = false
+        panel?.wallpaper = null
         if (intent?.action == ACTION_PREVIEW) {
             preview = true
             previewStart = SystemClock.uptimeMillis()
@@ -402,7 +405,10 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         peakFold = 0f
         lockOrientation()
         animating = true   // set before asking for the screenshot (the request checks it)
-        if (!isCover(screenW, screenH)) {
+        if (Prefs.glassMode(this)) {
+            snapState = Snap.READY          // glass box mode: no screenshot needed
+            openingNow = false
+        } else if (!isCover(screenW, screenH)) {
             if (openingNow) {
                 // Show the last good picture right away, then refresh once the screen has drawn
                 val fb = lastGood
@@ -620,6 +626,14 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         val p = ensurePanel() ?: return
         p.screenW = screenW
         p.screenH = screenH
+        val glass = Prefs.glassMode(this)
+        p.glassMode = glass
+        if (glass && p.wallpaper == null && !wallpaperTried) {
+            wallpaperTried = true
+            val wp = WallpaperSource.load(this, maxOf(screenW, screenH) / 2)
+            p.wallpaper = wp
+            log(if (wp != null) "wallpaper ${wp.width}x${wp.height}" else "no wallpaper (pick one in FoldFX), using grey")
+        }
         if (p.visibility != View.VISIBLE) {
             panelParams?.let { lp ->
                 lp.width = WindowManager.LayoutParams.MATCH_PARENT

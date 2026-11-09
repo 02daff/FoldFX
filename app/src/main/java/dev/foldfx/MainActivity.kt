@@ -33,6 +33,22 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var blurLabel: TextView
     private lateinit var logText: TextView
     private lateinit var halfButton: Button
+    private lateinit var modeButton: Button
+
+    companion object {
+        private const val REQ_WALLPAPER = 7
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_WALLPAPER && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            val ok = WallpaperSource.savePicked(this, uri)
+            android.widget.Toast.makeText(this, if (ok) "Wallpaper saved" else "Couldn't read that image", android.widget.Toast.LENGTH_SHORT).show()
+            if (ok && FoldOverlayService.running) startForegroundService(Intent(this, FoldOverlayService::class.java))
+        }
+    }
     private lateinit var projLabel: TextView
     private val logUpdater = object : Runnable {
         override fun run() {
@@ -89,6 +105,21 @@ class MainActivity : Activity(), SensorEventListener {
                 Intent(this, FoldOverlayService::class.java).setAction(FoldOverlayService.ACTION_PREVIEW)
             )
             handler.postDelayed({ refresh() }, 400)
+        })
+
+        modeButton = button("") {
+            Prefs.setGlassMode(this, !Prefs.glassMode(this))
+            if (FoldOverlayService.running) startForegroundService(Intent(this, FoldOverlayService::class.java))
+            refresh()
+        }
+        col.addView(modeButton)
+
+        col.addView(button("Pick wallpaper image (for glass box mode)") {
+            val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+            }
+            startActivityForResult(i, REQ_WALLPAPER)
         })
 
         halfButton = button("") {
@@ -216,6 +247,7 @@ class MainActivity : Activity(), SensorEventListener {
         }
         blurLabel.text = "Max blur: ${Prefs.maxBlur(this)} px"
         projLabel.text = "Content stays fixed in space: ${Prefs.projection(this)}%"
+        modeButton.text = "Effect content: " + (if (Prefs.glassMode(this)) "glass box + wallpaper" else "screenshot") + " (tap to change)"
         halfButton.text = "Half that swings: " + (if (Prefs.movingHalfLeft(this)) "left" else "right") + " (tap to change)"
     }
 

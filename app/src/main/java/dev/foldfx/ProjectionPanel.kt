@@ -105,6 +105,23 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             coverShader = value?.let { makeShader(it) }
         }
     private var coverShader: BitmapShader? = null
+    /** Glass-box mode: swinging half shows a frosted glass box over the wallpaper; other half untouched. */
+    var glassMode = false
+    var wallpaper: Bitmap? = null
+        set(value) {
+            field = value
+            wallShader = value?.let { makeShader(it) }
+            wallShaderFor = -1
+        }
+    private var wallShader: BitmapShader? = null
+    private var wallShaderFor = -1
+    private val wallMatrix = Matrix()
+    private val glassFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(105, 150, 150, 156) }
+    private val glassEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.argb(150, 255, 255, 255)
+    }
+
     /** true while opening from the cover screen (no fade to black). */
     var opening = false
     /** 0..1: how much of the cover picture is still showing (1 = only cover, 0 = gone). */
@@ -248,7 +265,8 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val step = 1f / (LAYERS - 1)
             for (k in 0 until LAYERS) {
                 val vk = k * step
-                val base = maxBlur * strength * vk.pow(1.3f)
+                val base = if (glassMode) maxBlur * strength * smoothstep((vk - 0.5f) / 0.5f)
+                else maxBlur * strength * vk.pow(1.3f)
                 layers[k].set((base * viewStretch(vk)).coerceAtMost(maxBlur * 1.5f), vk, step)
             }
             dimView.dim = dimMax * strength
@@ -262,8 +280,10 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val save = canvas.saveLayer(0f, 0f, w, h, null)
             super.dispatchDraw(canvas)
             val c = coverage.coerceIn(0f, 1f)
-            val stops = floatArrayOf(0f, 0.2f, 0.4f, 0.5f, 0.6f, 1f)
-            val alphas = floatArrayOf(0f, 0.12f, 0.55f, 0.85f, 1f, 1f)
+            val stops = if (glassMode) floatArrayOf(0f, 0.49f, 0.5f, 0.51f, 0.6f, 1f)
+                else floatArrayOf(0f, 0.2f, 0.4f, 0.5f, 0.6f, 1f)
+            val alphas = if (glassMode) floatArrayOf(0f, 0f, 0.5f, 1f, 1f, 1f)
+                else floatArrayOf(0f, 0.12f, 0.55f, 0.85f, 1f, 1f)
             val colors = IntArray(stops.size) { Color.argb((alphas[it] * c * 255).roundToInt(), 0, 0, 0) }
             fadePaint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
             canvas.drawRect(0f, 0f, w, h, fadePaint)
@@ -329,6 +349,16 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val w = width.toFloat()
             val h = height.toFloat()
             val half = w / 2f
+            if (glassMode) {
+                // only the swinging half: black void, then the glass box over the wallpaper
+                canvas.save()
+                if (movingLeft) canvas.clipRect(0f, 0f, half, h) else canvas.clipRect(half, 0f, w, h)
+                canvas.drawColor(Color.BLACK)
+                canvas.concat(this@ProjectionPanel.projMatrix)
+                drawGlassBox(canvas)
+                canvas.restore()
+                return
+            }
             // flat half
             canvas.save()
             if (movingLeft) canvas.clipRect(half, 0f, w, h) else canvas.clipRect(0f, 0f, half, h)
@@ -342,6 +372,33 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             drawPicture(canvas)
             drawCoverPicture(canvas, half, h)
             canvas.restore()
+        }
+
+        /** Wallpaper (center-crop over the whole screen) with a translucent grey glass box on top. */
+        private fun drawGlassBox(canvas: Canvas) {
+            val nw = natW.toFloat()
+            val nh = natH.toFloat()
+            rect.set(0f, 0f, nw, nh)
+            val r = cornerRadius
+            val wp = wallpaper
+            val shader = wallShader
+            if (wp != null && shader != null && !wp.isRecycled) {
+                val key = natW * 31 + natH
+                if (wallShaderFor != key) {
+                    val sc = maxOf(nw / wp.width, nh / wp.height)
+                    wallMatrix.setScale(sc, sc)
+                    wallMatrix.postTranslate((nw - wp.width * sc) / 2f, (nh - wp.height * sc) / 2f)
+                    shader.setLocalMatrix(wallMatrix)
+                    wallShaderFor = key
+                }
+                snapPaint.shader = shader
+                canvas.drawRoundRect(rect, r, r, snapPaint)
+            } else {
+                canvas.drawRoundRect(rect, r, r, grey)
+            }
+            canvas.drawRoundRect(rect, r, r, glassFill)
+            glassEdge.strokeWidth = (nw * 0.003f).coerceAtLeast(2f)
+            canvas.drawRoundRect(rect, r, r, glassEdge)
         }
 
         /** The cover screen's picture, filling the swinging half (center-crop), fading out. */

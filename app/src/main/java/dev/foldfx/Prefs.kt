@@ -28,4 +28,12 @@ object Prefs {
     fun setProjection(c: Context, value: Int) {
         c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("proj2", value).apply()
     }
+
+    /** true = swinging half shows a frosted glass box over the wallpaper instead of a screenshot. */
+    fun glassMode(c: Context): Boolean =
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean("glass", false)
+
+    fun setGlassMode(c: Context, value: Boolean) {
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean("glass", value).apply()
+    }
 }
