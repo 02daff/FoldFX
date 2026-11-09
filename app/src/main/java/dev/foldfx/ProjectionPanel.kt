@@ -42,6 +42,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
 
     companion object {
         const val LAYERS = 9
+        const val MAX_PROJECTION_FOLD = 55f
     }
 
     /** Current screen size (as the screen is now rotated). Changing it re-lays out the frame. */
@@ -140,8 +141,17 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     }
 
     fun update(fold: Float, strength: Float, maxBlur: Float, dimMax: Float, lock: Float) {
-        computeMatrix(fold * lock.coerceIn(0f, 1f))
-        frame.update(strength, maxBlur, dimMax)
+        // The "stays flat" projection stretches the picture by about 1/cos(fold) and flips past
+        // 90°, so stop it at 55° (about 1.7x stretch). Beyond that the panel just darkens.
+        computeMatrix((fold * lock.coerceIn(0f, 1f)).coerceAtMost(MAX_PROJECTION_FOLD))
+        // From 70° of fold the panel turns away from you: fade toward black (dark glass)
+        val away = smoothstep((fold - 70f) / 50f)
+        frame.update(strength, maxBlur, dimMax + (0.92f - dimMax) * away)
+    }
+
+    private fun smoothstep(x: Float): Float {
+        val t = x.coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
     }
 
     private fun computeMatrix(foldDeg: Float) {
