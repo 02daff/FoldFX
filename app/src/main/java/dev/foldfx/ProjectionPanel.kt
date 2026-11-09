@@ -41,7 +41,7 @@ import kotlin.math.sin
 class ProjectionPanel(context: Context) : FrameLayout(context) {
 
     companion object {
-        const val LAYERS = 5
+        const val LAYERS = 6
         /** Glass mode: where the effect begins, a bit past the hinge into the flat half (hinge = 0.5). */
         const val GLASS_START = 0.38f
     }
@@ -114,7 +114,29 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             field = value
             wallShader = value?.let { makeShader(it) }
             wallShaderFor = -1
+            fogColor = value?.let { averageColor(it) } ?: Color.rgb(34, 30, 46)
         }
+    /** Average colour of the wallpaper, used as the fog colour. */
+    private var fogColor = Color.rgb(34, 30, 46)
+
+    private fun averageColor(b: Bitmap): Int {
+        var r = 0L; var g = 0L; var bl = 0L; var n = 0
+        val sx = (b.width / 16).coerceAtLeast(1)
+        val sy = (b.height / 16).coerceAtLeast(1)
+        var y = sy / 2
+        while (y < b.height) {
+            var x = sx / 2
+            while (x < b.width) {
+                val c = b.getPixel(x, y)
+                r += (c shr 16) and 0xff; g += (c shr 8) and 0xff; bl += c and 0xff; n++
+                x += sx
+            }
+            y += sy
+        }
+        if (n == 0) return Color.rgb(34, 30, 46)
+        // slightly darker than the average, so the fog stays moody like the iPhone
+        return Color.rgb((r / n * 0.8f).toInt(), (g / n * 0.8f).toInt(), (bl / n * 0.8f).toInt())
+    }
     private var wallShader: BitmapShader? = null
     private var wallShaderFor = -1
     private val wallMatrix = Matrix()
@@ -267,12 +289,21 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         fun update(strength: Float, maxBlur: Float, dimMax: Float, haze: Float, away: Float) {
             dimView.haze = haze
             dimView.away = away
-            val step = 1f / (LAYERS - 1)
-            for (k in 0 until LAYERS) {
-                val vk = k * step
-                val base = if (glassMode) maxBlur * strength * ((vk - GLASS_START) / (1f - GLASS_START)).coerceIn(0f, 1f).pow(1.4f)
-                else maxBlur * strength * vk.pow(1.3f)
-                layers[k].set((base * viewStretch(vk)).coerceAtMost(maxBlur * 1.5f), vk, step)
+            if (glassMode) {
+                // Fog: all layers spread from the split to the far edge, blur growing to ~2x max
+                val step = (1f - GLASS_START) / (LAYERS - 1)
+                for (k in 0 until LAYERS) {
+                    val vk = GLASS_START + k * step
+                    val x = (vk - GLASS_START) / (1f - GLASS_START)
+                    layers[k].set(maxBlur * 2.2f * strength * x.pow(1.1f), vk, step)
+                }
+            } else {
+                val step = 1f / (LAYERS - 1)
+                for (k in 0 until LAYERS) {
+                    val vk = k * step
+                    val base = maxBlur * strength * vk.pow(1.3f)
+                    layers[k].set((base * viewStretch(vk)).coerceAtMost(maxBlur * 1.5f), vk, step)
+                }
             }
             dimView.dim = dimMax * strength
             dimView.invalidate()
@@ -504,9 +535,17 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val h = height.toFloat()
             val hz = haze.coerceIn(0f, 1f)
             if (hz > 0.003f) {
-                // deepening dark tint toward the far edge (like the iPhone's dark glass)
                 val stops = floatArrayOf(0f, GLASS_START, 0.55f, 0.75f, 1f)
-                val a = floatArrayOf(0f, 0f, 0.15f, 0.42f, 0.72f)
+                // fog in the wallpaper's own colour: flattens contrast so shapes lose their edges
+                val fa = floatArrayOf(0f, 0f, 0.22f, 0.45f, 0.62f)
+                val fc = fogColor
+                val fogColors = IntArray(stops.size) {
+                    Color.argb((fa[it] * hz * 255).roundToInt(), Color.red(fc), Color.green(fc), Color.blue(fc))
+                }
+                paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, fogColors, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, 0f, w, h, paint)
+                // then a lighter dark tint deepening toward the far edge
+                val a = floatArrayOf(0f, 0f, 0.08f, 0.25f, 0.5f)
                 val colors = IntArray(stops.size) { Color.argb((a[it] * hz * 255).roundToInt(), 16, 12, 26) }
                 paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
                 canvas.drawRect(0f, 0f, w, h, paint)
