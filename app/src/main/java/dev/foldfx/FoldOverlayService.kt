@@ -102,6 +102,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private var coverAskedAt = 0L
     private var openingFromCover = false
     private var switchedToInnerAt = 0L
+    private var openingNow = false
     private var panel: ProjectionPanel? = null
     private var panelParams: WindowManager.LayoutParams? = null
 
@@ -223,6 +224,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             coverSweepAt = 0L
             switchedToInnerAt = SystemClock.uptimeMillis()
             openingFromCover = false   // opening plays the closing animation in reverse
+            openingNow = true
             ensurePanel()
             lastMoveAt = SystemClock.uptimeMillis()
             shownAngle = targetAngle
@@ -232,32 +234,90 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
     // ---- animation ----
 
-    /** Ask for one screenshot of the current screen before the effect becomes visible. */
-    private fun requestSnapshot() {
-        if (snapState != Snap.NONE) return
-        snapAskedAt = SystemClock.uptimeMillis()
-        snapState = Snap.WAITING
-        val asked = FoldAccessibilityService.capture { bmp ->
-            if (snapState == Snap.WAITING) {
-                snapshot?.recycle()
-                snapshot = bmp
-                snapState = Snap.READY
-                log(if (bmp != null) "screenshot ${bmp.width}x${bmp.height} in ${SystemClock.uptimeMillis() - snapAskedAt} ms" else "no screenshot, using grey")
-                panel?.snapshot = bmp
-            } else {
-                bmp?.recycle()
-            }
-        }
-        if (!asked) {
+    /** Last good big-screen screenshot, kept between folds as a fallback for opening. */
+    private var lastGood: android.graphics.Bitmap? = null
+    private var snapToken = 0
+
+    /** Recycle a bitmap only if nothing still uses it. */
+    private fun release(b: android.graphics.Bitmap?) {
+        if (b != null && b !== snapshot && b !== lastGood && !b.isRecycled) b.recycle()
+    }
+
+    /**
+     * Ask for a screenshot of the current screen.
+     * delayMs: wait before taking it (the big screen needs a moment to draw after turning on).
+     * retries: how many more tries if the picture comes back black or fails.
+     */
+    private fun requestSnapshot(delayMs: Long = 0L, retries: Int = 0) {
+        if (FoldAccessibilityService.instance == null) {
+            if (snapState == Snap.NONE) log("screenshot access off")
             snapState = Snap.READY
-            log("screenshot access off, using grey")
+            return
         }
+        if (snapState == Snap.NONE) {
+            snapState = Snap.WAITING
+            snapAskedAt = SystemClock.uptimeMillis()
+        }
+        val token = ++snapToken
+        val take = Runnable {
+            if (token != snapToken || !animating) return@Runnable
+            val askedAt = SystemClock.uptimeMillis()
+            val asked = FoldAccessibilityService.capture { bmp ->
+                if (token != snapToken || !animating) { release(bmp); return@capture }
+                val ok = bmp != null && !isMostlyBlack(bmp) && !isCover(bmp.width, bmp.height)
+                if (ok) {
+                    val old = snapshot
+                    snapshot = bmp
+                    snapState = Snap.READY
+                    panel?.snapshot = bmp
+                    release(old)
+                    log("screenshot ${bmp!!.width}x${bmp.height} in ${SystemClock.uptimeMillis() - askedAt} ms")
+                } else {
+                    release(bmp)
+                    log(if (bmp == null) "screenshot failed" else "screenshot was black")
+                    if (retries > 0) {
+                        requestSnapshot(350L, retries - 1)   // Android allows about 3 per second
+                    } else if (snapState == Snap.WAITING) {
+                        snapState = Snap.READY              // give up, keep whatever we show
+                    }
+                }
+            }
+            if (!asked) snapState = Snap.READY
+        }
+        if (delayMs > 0) main.postDelayed(take, delayMs) else take.run()
+    }
+
+    /** True if almost every sampled pixel is (near) black, e.g. a screen that hasn't drawn yet. */
+    private fun isMostlyBlack(b: android.graphics.Bitmap): Boolean {
+        var dark = 0
+        var total = 0
+        val stepX = (b.width / 12).coerceAtLeast(1)
+        val stepY = (b.height / 12).coerceAtLeast(1)
+        var y = stepY / 2
+        while (y < b.height) {
+            var x = stepX / 2
+            while (x < b.width) {
+                val c = b.getPixel(x, y)
+                val m = maxOf((c shr 16) and 0xff, (c shr 8) and 0xff, c and 0xff)
+                if (m < 12) dark++
+                total++
+                x += stepX
+            }
+            y += stepY
+        }
+        return total > 0 && dark >= total * 0.97f
     }
 
     private fun clearSnapshot() {
+        snapToken++                       // cancel pending retries
         panel?.snapshot = null
-        snapshot?.recycle()
+        val cur = snapshot
         snapshot = null
+        if (cur != null && cur !== lastGood) {
+            val old = lastGood
+            lastGood = cur                 // keep it as the fallback for the next opening
+            release(old)
+        }
         snapState = Snap.NONE
     }
 
@@ -294,7 +354,22 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         lastTickAt = SystemClock.uptimeMillis()
         peakFold = 0f
         lockOrientation()
-        if (!isCover(screenW, screenH)) requestSnapshot()
+        animating = true   // set before asking for the screenshot (the request checks it)
+        if (!isCover(screenW, screenH)) {
+            if (openingNow) {
+                // Show the last good picture right away, then refresh once the screen has drawn
+                val fb = lastGood
+                if (fb != null && !fb.isRecycled && fb.width == screenW && fb.height == screenH) {
+                    snapshot = fb
+                    log("opening: showing last picture while waiting")
+                }
+                snapState = Snap.READY
+                requestSnapshot(200L, 2)
+                openingNow = false
+            } else {
+                requestSnapshot(0L, 1)
+            }
+        }
         animating = true
         fade = 1f
         if (!frameRunning) {
