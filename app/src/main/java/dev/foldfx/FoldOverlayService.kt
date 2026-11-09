@@ -114,6 +114,13 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private var lastMoveAt = 0L
     private var fade = 1f
     private var peakFold = 0f        // holds a quick fold long enough to be seen
+
+    // Hinge readings arrive on their own thread; the frame loop predicts between them
+    private val sensorThread = android.os.HandlerThread("foldfx-hinge").apply { start() }
+    @Volatile private var evtAngle = 180f
+    @Volatile private var evtTimeNs = 0L
+    @Volatile private var velocity = 0f            // degrees per second
+    @Volatile private var evtCount = 0
     private var lastTickAt = 0L
     private var preview = false
     private var previewStart = 0L
@@ -138,7 +145,10 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             return
         }
         currentSize().let { screenW = it.first; screenH = it.second }
-        sensors.registerListener(this, hinge, SensorManager.SENSOR_DELAY_FASTEST)
+        sensors.registerListener(this, hinge, 0, 0, Handler(sensorThread.looper))   // fastest, no batching
+        hinge?.let {
+            log("hinge sensor: min interval ${it.minDelay} µs, mode ${it.reportingMode}")
+        }
         displays.registerDisplayListener(this, main)
         running = true
         if (!isCover(screenW, screenH)) main.post { ensurePanel() }
@@ -158,6 +168,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     override fun onDestroy() {
         running = false
         if (::sensors.isInitialized) sensors.unregisterListener(this)
+        sensorThread.quitSafely()
         if (::displays.isInitialized) displays.unregisterDisplayListener(this)
         Choreographer.getInstance().removeFrameCallback(frame)
         frameRunning = false
@@ -177,8 +188,28 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
     // ---- hinge ----
 
+    /** Runs on the sensor thread: record the reading and how fast the hinge is moving. */
     override fun onSensorChanged(event: SensorEvent) {
         val a = event.values[0].coerceIn(0f, 180f)
+        val ts = event.timestamp
+        val prevTs = evtTimeNs
+        if (prevTs != 0L) {
+            val dt = (ts - prevTs) / 1e9f
+            if (dt in 0.002f..0.25f) {
+                val inst = (a - evtAngle) / dt
+                velocity = 0.6f * inst + 0.4f * velocity
+            } else {
+                velocity = 0f
+            }
+        }
+        evtAngle = a
+        evtTimeNs = ts
+        evtCount++
+        main.post { onHinge(a) }
+    }
+
+    /** Main thread: start/stop logic. */
+    private fun onHinge(a: Float) {
         val now = SystemClock.uptimeMillis()
         if (!hasReading) {
             hasReading = true
@@ -190,10 +221,22 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             lastMoveAt = now
             if (!animating && !isCover(screenW, screenH) && a < START_BELOW) {
                 log("folding from ${targetAngle.roundToInt()}°")
+                evtCount = 0
                 begin()
             }
         }
         targetAngle = a
+    }
+
+    /** Hinge angle for this frame: last reading plus where it has moved since (prediction). */
+    private fun predictedAngle(): Float {
+        val ts = evtTimeNs
+        if (ts == 0L) return targetAngle
+        val dt = ((SystemClock.elapsedRealtimeNanos() - ts) / 1e9f).coerceIn(0f, 0.06f)
+        val v = velocity
+        // stop predicting if no new reading for a while (hinge has probably stopped)
+        val damp = if (dt >= 0.06f) 0f else 1f
+        return (evtAngle + v * dt * damp).coerceIn(0f, 180f)
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -350,7 +393,11 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         lockView = null
     }
 
+    private var animStartedAt = 0L
+
     private fun begin() {
+        animStartedAt = SystemClock.uptimeMillis()
+        evtCount = 0
         lastTickAt = SystemClock.uptimeMillis()
         peakFold = 0f
         lockOrientation()
@@ -379,7 +426,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     }
 
     private fun finish() {
-        log("effect ended")
+        val secs = (SystemClock.uptimeMillis() - animStartedAt) / 1000f
+        if (secs > 0.2f) log("effect ended (hinge ${(evtCount / secs).roundToInt()} readings/s)") else log("effect ended")
         animating = false
         frameRunning = false
         preview = false
@@ -427,7 +475,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 angle = 180f - 110f * smooth(tri.coerceIn(0f, 1f))
                 shownAngle = angle
             } else {
-                shownAngle += (targetAngle - shownAngle) * 0.65f   // follow the hinge closely
+                shownAngle += (predictedAngle() - shownAngle) * 0.9f   // near real time
                 angle = shownAngle
             }
             val still = !preview && now - lastMoveAt > IDLE_FADE_MS
