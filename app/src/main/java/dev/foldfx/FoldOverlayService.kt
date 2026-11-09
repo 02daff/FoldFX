@@ -681,7 +681,9 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                alpha = if (a11y != null) 1f else 0.8f
+                // Fully opaque. Android ignores taps under an opaque app overlay, but this window
+                // is only full-size while you are folding, so that never gets in the way.
+                alpha = 1f
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                 fitInsetsTypes = 0
                 gravity = Gravity.TOP or Gravity.LEFT
