@@ -42,6 +42,8 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
 
     companion object {
         const val LAYERS = 5
+        /** Glass mode: where the effect begins, a bit past the hinge into the flat half (hinge = 0.5). */
+        const val GLASS_START = 0.38f
     }
 
     /** Current screen size (as the screen is now rotated). Changing it re-lays out the frame. */
@@ -116,7 +118,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     private var wallShader: BitmapShader? = null
     private var wallShaderFor = -1
     private val wallMatrix = Matrix()
-    private val glassFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(105, 150, 150, 156) }
+    private val glassFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(70, 160, 160, 168) }
     private val glassEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         color = Color.argb(150, 255, 255, 255)
@@ -192,7 +194,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         // Fade to black between hinge readings 80° and 60° (fold 100° -> 120°).
         // Not when opening from the cover screen: then the cover picture should be seen.
         val away = if (opening) 0f else smoothstep((fold - 100f) / 20f)
-        frame.update(strength, maxBlur, dimMax + (1f - dimMax) * away)
+        frame.update(strength, maxBlur, dimMax + (1f - dimMax) * away, strength, away)
     }
 
     private fun smoothstep(x: Float): Float {
@@ -261,11 +263,13 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             setWillNotDraw(false)
         }
 
-        fun update(strength: Float, maxBlur: Float, dimMax: Float) {
+        fun update(strength: Float, maxBlur: Float, dimMax: Float, haze: Float, away: Float) {
+            dimView.haze = haze
+            dimView.away = away
             val step = 1f / (LAYERS - 1)
             for (k in 0 until LAYERS) {
                 val vk = k * step
-                val base = if (glassMode) maxBlur * strength * smoothstep((vk - 0.5f) / 0.5f)
+                val base = if (glassMode) maxBlur * strength * ((vk - GLASS_START) / (1f - GLASS_START)).coerceIn(0f, 1f).pow(1.4f)
                 else maxBlur * strength * vk.pow(1.3f)
                 layers[k].set((base * viewStretch(vk)).coerceAtMost(maxBlur * 1.5f), vk, step)
             }
@@ -280,9 +284,9 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val save = canvas.saveLayer(0f, 0f, w, h, null)
             super.dispatchDraw(canvas)
             val c = coverage.coerceIn(0f, 1f)
-            val stops = if (glassMode) floatArrayOf(0f, 0.49f, 0.5f, 0.51f, 0.6f, 1f)
+            val stops = if (glassMode) floatArrayOf(0f, GLASS_START, 0.46f, 0.55f, 0.7f, 1f)
                 else floatArrayOf(0f, 0.2f, 0.4f, 0.5f, 0.6f, 1f)
-            val alphas = if (glassMode) floatArrayOf(0f, 0f, 0.5f, 1f, 1f, 1f)
+            val alphas = if (glassMode) floatArrayOf(0f, 0f, 0.22f, 0.5f, 0.82f, 1f)
                 else floatArrayOf(0f, 0.12f, 0.55f, 0.85f, 1f, 1f)
             val colors = IntArray(stops.size) { Color.argb((alphas[it] * c * 255).roundToInt(), 0, 0, 0) }
             fadePaint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
@@ -350,7 +354,12 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val h = height.toFloat()
             val half = w / 2f
             if (glassMode) {
-                // only the swinging half: black void, then the glass box over the wallpaper
+                // flat half (only the part past the hinge shows, the mask fades it in)
+                canvas.save()
+                if (movingLeft) canvas.clipRect(half, 0f, w, h) else canvas.clipRect(0f, 0f, half, h)
+                drawGlassBox(canvas)
+                canvas.restore()
+                // swinging half: black void, then the glass box over the wallpaper, in perspective
                 canvas.save()
                 if (movingLeft) canvas.clipRect(0f, 0f, half, h) else canvas.clipRect(half, 0f, w, h)
                 canvas.drawColor(Color.BLACK)
@@ -466,9 +475,15 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     /** Dark glass: smooth darkening rising toward the swinging edge. */
     private inner class DimView(context: Context) : View(context) {
         var dim = 0f
+        var haze = 0f
+        var away = 0f
         private val paint = Paint()
 
         override fun onDraw(canvas: Canvas) {
+            if (glassMode) {
+                drawGlassHaze(canvas)
+                return
+            }
             if (dim < 0.003f) return
             val stops = floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)
             // As dim approaches 1 the gradient flattens into solid black over the swinging half
@@ -481,6 +496,28 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             }
             paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+        }
+
+        /** Milky haze growing toward the far edge; black only as the panel turns away. */
+        private fun drawGlassHaze(canvas: Canvas) {
+            val w = width.toFloat()
+            val h = height.toFloat()
+            val hz = haze.coerceIn(0f, 1f)
+            if (hz > 0.003f) {
+                val stops = floatArrayOf(0f, GLASS_START, 0.55f, 0.75f, 1f)
+                val a = floatArrayOf(0f, 0f, 0.10f, 0.28f, 0.45f)
+                val colors = IntArray(stops.size) { Color.argb((a[it] * hz * 255).roundToInt(), 235, 237, 242) }
+                paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, 0f, w, h, paint)
+            }
+            val aw = away.coerceIn(0f, 1f)
+            if (aw > 0.003f) {
+                val stops = floatArrayOf(0f, 0.45f, 0.55f, 1f)
+                val a = floatArrayOf(0f, 0f, aw, aw)
+                val colors = IntArray(stops.size) { Color.argb((a[it] * 255).roundToInt(), 0, 0, 0) }
+                paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, 0f, w, h, paint)
+            }
         }
     }
 }
