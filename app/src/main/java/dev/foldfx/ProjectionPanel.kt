@@ -158,9 +158,9 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         // picture looks smaller inside the moving frame and black void opens around it.
         // Keeps moving smoothly all the way to 90°, then the panel fades to dark.
         computeMatrix(fold.coerceAtMost(90f), lock.coerceIn(0f, 1f))
-        // From 70° of fold the panel turns away from you: fade toward black (dark glass)
-        val away = smoothstep((fold - 70f) / 50f)
-        frame.update(strength, maxBlur, dimMax + (0.92f - dimMax) * away)
+        // Fade to black between hinge readings 80° and 60° (fold 100° -> 120°)
+        val away = smoothstep((fold - 100f) / 20f)
+        frame.update(strength, maxBlur, dimMax + (1f - dimMax) * away)
     }
 
     private fun smoothstep(x: Float): Float {
@@ -377,8 +377,13 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         override fun onDraw(canvas: Canvas) {
             if (dim < 0.003f) return
             val stops = floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)
+            // As dim approaches 1 the gradient flattens into solid black over the swinging half
+            val flat = ((dim - 0.7f) / 0.3f).coerceIn(0f, 1f)
             val colors = IntArray(stops.size) {
-                Color.argb((dim * stops[it].pow(1.4f) * 255).roundToInt().coerceIn(0, 255), 0, 0, 0)
+                val g = stops[it].pow(1.4f)
+                val swing = if (stops[it] >= 0.5f) 1f else stops[it] * 2f    // full on swinging half
+                val a = dim * (g + (swing - g) * flat)
+                Color.argb((a * 255).roundToInt().coerceIn(0, 255), 0, 0, 0)
             }
             paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)

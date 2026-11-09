@@ -349,7 +349,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             peakFold = if (preview) rawFold else maxOf(rawFold, peakFold - 300f * dt)
             val fold = peakFold
             // grows all the way from flat to closed (fast at first, then keeps building)
-            val strength = (fold / 160f).coerceIn(0f, 1f).pow(0.6f) * fade
+            // full blur by a hinge reading of 80° (fold 100°)
+            val strength = (fold / 100f).coerceIn(0f, 1f).pow(0.6f) * fade
             val appear = smooth((fold / 20f).coerceIn(0f, 1f)) * fade        // projection fades in off flat
             for (i in 0 until STRIPS) {
                 val x = (i + 0.5f) / STRIPS                 // 0 = at hinge, 1 = outer edge
