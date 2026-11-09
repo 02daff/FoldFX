@@ -41,7 +41,7 @@ import kotlin.math.sin
 class ProjectionPanel(context: Context) : FrameLayout(context) {
 
     companion object {
-        const val LAYERS = 9
+        const val LAYERS = 5
         const val MAX_PROJECTION_FOLD = 55f
     }
 
@@ -77,16 +77,27 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     var snapshot: Bitmap? = null
         set(value) {
             field = value
-            snapShader = value?.let {
-                if (Build.VERSION.SDK_INT >= 31) BitmapShader(it, Shader.TileMode.DECAL, Shader.TileMode.DECAL)
-                else BitmapShader(it, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            snapSmall?.recycle()
+            snapSmall = value?.let {
+                // Blurred layers don't need full resolution: half size is ~4x less work
+                Bitmap.createScaledBitmap(it, (it.width / 2).coerceAtLeast(1), (it.height / 2).coerceAtLeast(1), true)
             }
+            snapShader = value?.let { makeShader(it) }
+            snapSmallShader = snapSmall?.let { makeShader(it) }
             snapShaderFor = -1
+            snapSmallShaderFor = -1
         }
+    private var snapSmall: Bitmap? = null
     private var snapShader: BitmapShader? = null
+    private var snapSmallShader: BitmapShader? = null
     private var snapShaderFor = -1
+    private var snapSmallShaderFor = -1
     private val snapPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val shaderMatrix = Matrix()
+
+    private fun makeShader(b: Bitmap): BitmapShader =
+        if (Build.VERSION.SDK_INT >= 31) BitmapShader(b, Shader.TileMode.DECAL, Shader.TileMode.DECAL)
+        else BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
 
     /** screen -> natural frame, for drawing the screenshot inside the natural frame */
     private val screenToNatural = Matrix()
@@ -190,7 +201,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         val d = (v - 0.5f) * natW
         val denom = (curZc - d * curSin).coerceAtLeast(1f)
         val dxdd = abs(curCos) * curZc * curZc / (denom * denom)
-        return (1f / dxdd.coerceAtLeast(0.3f)).coerceIn(1f, 3.3f)
+        return (1f / dxdd.coerceAtLeast(0.3f)).coerceIn(1f, 1.5f)
     }
 
     // =====================================================================
@@ -218,7 +229,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             for (k in 0 until LAYERS) {
                 val vk = k * step
                 val base = maxBlur * strength * vk.pow(1.3f)
-                layers[k].set((base * viewStretch(vk)).coerceAtMost(maxBlur * 3f), vk, step)
+                layers[k].set((base * viewStretch(vk)).coerceAtMost(maxBlur * 1.5f), vk, step)
             }
             dimView.dim = dimMax * strength
             dimView.invalidate()
@@ -241,7 +252,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     }
 
     private inner class BlurLayer(context: Context, private val index: Int) : FrameLayout(context) {
-        private val content = ContentView(context)
+        private val content = ContentView(context, index == 0)
         private var vk = 0f
         private var ramp = 0f
         private val maskPaint = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
@@ -277,7 +288,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     }
 
     /** The picture: flat half as-is, swinging half projected, black void around it. */
-    private inner class ContentView(context: Context) : View(context) {
+    private inner class ContentView(context: Context, private val sharp: Boolean) : View(context) {
         private var blur = -1
         private val grey = Paint().apply { color = Color.rgb(128, 128, 132) }
         private val tile = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(170, 170, 176) }
@@ -316,14 +327,15 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         private fun drawPicture(canvas: Canvas) {
             val nw = natW.toFloat()
             val nh = natH.toFloat()
-            val bmp = this@ProjectionPanel.snapshot
-            val shader = this@ProjectionPanel.snapShader
+            val bmp = if (sharp) this@ProjectionPanel.snapshot else (snapSmall ?: this@ProjectionPanel.snapshot)
+            val shader = if (sharp || snapSmall == null) snapShader else snapSmallShader
             if (bmp != null && shader != null && !bmp.isRecycled) {
                 val key = screenW * 31 + screenH
-                if (snapShaderFor != key) {
+                val done = if (shader === snapShader) snapShaderFor == key else snapSmallShaderFor == key
+                if (!done) {
                     shaderMatrix.setScale(screenW.toFloat() / bmp.width, screenH.toFloat() / bmp.height)
                     shader.setLocalMatrix(shaderMatrix)
-                    snapShaderFor = key
+                    if (shader === snapShader) snapShaderFor = key else snapSmallShaderFor = key
                 }
                 snapPaint.shader = shader
                 canvas.save()

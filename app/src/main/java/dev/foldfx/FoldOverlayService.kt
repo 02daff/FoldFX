@@ -479,6 +479,11 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         p.screenW = screenW
         p.screenH = screenH
         if (p.visibility != View.VISIBLE) {
+            panelParams?.let { lp ->
+                lp.width = WindowManager.LayoutParams.MATCH_PARENT
+                lp.height = WindowManager.LayoutParams.MATCH_PARENT
+                runCatching { (panelHost ?: wm).updateViewLayout(p, lp) }
+            }
             p.visibility = View.VISIBLE
             log("effect visible (${screenW}x$screenH, rotation ${displays.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: 0})")
         }
@@ -505,8 +510,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             if (a11y == null && !Settings.canDrawOverlays(this)) return null
             p = ProjectionPanel(hostCtx)
             lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
+                1, 1,     // kept tiny and hidden until a fold starts, so it costs nothing while idle
                 if (a11y != null) WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
                 else WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -528,7 +532,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 panel = p
                 panelParams = lp
                 panelHost = host
-                p.visibility = View.INVISIBLE
+                p.visibility = View.GONE
                 p.screenW = screenW
                 p.screenH = screenH
                 log("effect window ready (" + (if (a11y != null) "full opacity" else "80% overlay") + ")")
@@ -541,10 +545,14 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     }
 
     private fun hidePanel() {
-        panel?.let {
-            it.snapshot = null
-            it.coverage = 0f
-            it.visibility = View.INVISIBLE
+        val p = panel ?: return
+        p.snapshot = null
+        p.coverage = 0f
+        p.visibility = View.GONE
+        panelParams?.let { lp ->
+            lp.width = 1
+            lp.height = 1
+            runCatching { (panelHost ?: wm).updateViewLayout(p, lp) }
         }
     }
 
