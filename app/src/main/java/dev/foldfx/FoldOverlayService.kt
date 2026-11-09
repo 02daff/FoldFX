@@ -476,9 +476,12 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
     private fun renderPanel(movingLeft: Boolean, fold: Float, appear: Float, strength: Float, maxBlur: Float) {
         val p = ensurePanel() ?: return
-        if (p.visibility != View.VISIBLE) p.visibility = View.VISIBLE
         p.screenW = screenW
         p.screenH = screenH
+        if (p.visibility != View.VISIBLE) {
+            p.visibility = View.VISIBLE
+            log("effect visible (${screenW}x$screenH, rotation ${displays.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: 0})")
+        }
         p.rotation90 = displays.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: 0
         p.movingLeft = movingLeft
         if (p.snapshot !== snapshot) p.snapshot = snapshot
@@ -526,6 +529,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 panelParams = lp
                 panelHost = host
                 p.visibility = View.INVISIBLE
+                p.screenW = screenW
+                p.screenH = screenH
                 log("effect window ready (" + (if (a11y != null) "full opacity" else "80% overlay") + ")")
             } catch (e: Exception) {
                 log("projection FAILED: ${e.javaClass.simpleName}")

@@ -44,9 +44,21 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         const val LAYERS = 9
     }
 
-    /** Current screen size (as the screen is now rotated). */
+    /** Current screen size (as the screen is now rotated). Changing it re-lays out the frame. */
     var screenW = 1
+        set(value) {
+            if (field != value) {
+                field = value
+                requestLayout()
+            }
+        }
     var screenH = 1
+        set(value) {
+            if (field != value) {
+                field = value
+                requestLayout()
+            }
+        }
     /** Display rotation: 0, 1, 2, 3 = 0°, 90°, 180°, 270° (Surface.ROTATION_*). */
     var rotation90 = 0
         set(value) {
