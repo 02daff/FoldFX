@@ -490,6 +490,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         p.rotation90 = displays.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: 0
         p.movingLeft = movingLeft
         if (p.snapshot !== snapshot) p.snapshot = snapshot
+        if (p.cornerRadius == 0f) p.cornerRadius = screenCornerRadius()
         p.coverage = appear
         p.update(fold, strength, maxBlur, 0.7f, Prefs.projection(this) / 100f)
     }
@@ -542,6 +543,16 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             }
         }
         return p
+    }
+
+    /** The display's rounded-corner radius (Android 12+), or a typical value. */
+    private fun screenCornerRadius(): Float {
+        val d = displays.getDisplay(Display.DEFAULT_DISPLAY)
+        if (Build.VERSION.SDK_INT >= 31 && d != null) {
+            val r = d.getRoundedCorner(android.view.RoundedCorner.POSITION_TOP_LEFT)?.radius ?: 0
+            if (r > 0) return r.toFloat()
+        }
+        return minOf(screenW, screenH) * 0.045f
     }
 
     private fun hidePanel() {

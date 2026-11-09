@@ -42,7 +42,6 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
 
     companion object {
         const val LAYERS = 5
-        const val MAX_PROJECTION_FOLD = 55f
     }
 
     /** Current screen size (as the screen is now rotated). Changing it re-lays out the frame. */
@@ -99,6 +98,9 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         if (Build.VERSION.SDK_INT >= 31) BitmapShader(b, Shader.TileMode.DECAL, Shader.TileMode.DECAL)
         else BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
 
+    /** Corner radius of the real screen, so the floating picture has the same rounded corners. */
+    var cornerRadius = 0f
+
     /** screen -> natural frame, for drawing the screenshot inside the natural frame */
     private val screenToNatural = Matrix()
 
@@ -152,9 +154,10 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     }
 
     fun update(fold: Float, strength: Float, maxBlur: Float, dimMax: Float, lock: Float) {
-        // The "stays flat" projection stretches the picture by about 1/cos(fold) and flips past
-        // 90°, so stop it at 55° (about 1.7x stretch). Beyond that the panel just darkens.
-        computeMatrix((fold * lock.coerceIn(0f, 1f)).coerceAtMost(MAX_PROJECTION_FOLD))
+        // No stretching: the panel only gets the perspective of coming toward you, so the flat
+        // picture looks smaller inside the moving frame and black void opens around it.
+        // Keeps moving smoothly all the way to 90°, then the panel fades to dark.
+        computeMatrix(fold.coerceAtMost(90f), lock.coerceIn(0f, 1f))
         // From 70° of fold the panel turns away from you: fade toward black (dark glass)
         val away = smoothstep((fold - 70f) / 50f)
         frame.update(strength, maxBlur, dimMax + (0.92f - dimMax) * away)
@@ -165,15 +168,19 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         return t * t * (3f - 2f * t)
     }
 
-    private fun computeMatrix(foldDeg: Float) {
+    /**
+     * Perspective of the swinging panel coming toward the viewer, WITHOUT the sideways
+     * stretch: panel point (d, y) shows the picture at (d * t, cy + (y - cy) * t), where
+     * t = zc / (zc - d * sin(fold)) grows toward the outer edge. The picture therefore shrinks
+     * toward the hinge inside the moving frame, and black void appears around it.
+     */
+    private fun computeMatrix(foldDeg: Float, amount: Float) {
         val w = natW.toFloat()
         val h = natH.toFloat().coerceAtLeast(1f)
         val half = w / 2f
-        val phi = Math.toRadians(foldDeg.toDouble())
-        val c = cos(phi).toFloat()
-        val s = sin(phi).toFloat()
-        val zc = 2.2f * w
-        curCos = c; curSin = s; curZc = zc
+        val s = (sin(Math.toRadians(foldDeg.toDouble())).toFloat() * amount).coerceIn(0f, 1f)
+        val zc = 1.2f * w                                   // viewer distance (closer = stronger effect)
+        curCos = 1f; curSin = s; curZc = zc
         val cy = h / 2f
         val ds = floatArrayOf(0f, half, half, 0f)
         val ys = floatArrayOf(0f, 0f, h, h)
@@ -182,10 +189,8 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val d = ds[k]
             val y = ys[k]
             val t = zc / (zc - d * s).coerceAtLeast(1f)
-            val xi = d * c * t
-            val yi = cy + t * (y - cy)
-            src[k * 2] = half + sign * xi
-            src[k * 2 + 1] = yi
+            src[k * 2] = half + sign * d * t
+            src[k * 2 + 1] = cy + t * (y - cy)
             dst[k * 2] = half + sign * d
             dst[k * 2 + 1] = y
         }
@@ -201,7 +206,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         val d = (v - 0.5f) * natW
         val denom = (curZc - d * curSin).coerceAtLeast(1f)
         val dxdd = abs(curCos) * curZc * curZc / (denom * denom)
-        return (1f / dxdd.coerceAtLeast(0.3f)).coerceIn(1f, 1.5f)
+        return 1f   // no stretching any more, so no extra blur needed
     }
 
     // =====================================================================
@@ -338,13 +343,16 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                     if (shader === snapShader) snapShaderFor = key else snapSmallShaderFor = key
                 }
                 snapPaint.shader = shader
+                val r = cornerRadius
                 canvas.save()
                 canvas.concat(screenToNatural)          // screenshot is in screen orientation
-                canvas.drawRect(0f, 0f, screenW.toFloat(), screenH.toFloat(), snapPaint)
+                rect.set(0f, 0f, screenW.toFloat(), screenH.toFloat())
+                canvas.drawRoundRect(rect, r, r, snapPaint)
                 canvas.restore()
                 return
             }
-            canvas.drawRect(0f, 0f, nw, nh, grey)
+            rect.set(0f, 0f, nw, nh)
+            canvas.drawRoundRect(rect, cornerRadius, cornerRadius, grey)
             val cols = 8
             val pad = nw * 0.04f
             val size = (nw - pad * (cols + 1)) / cols
