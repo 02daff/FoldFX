@@ -116,6 +116,45 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             wallShaderFor = -1
             fogColor = value?.let { averageColor(it) } ?: Color.rgb(34, 30, 46)
         }
+    // ---- star sparkles (glass mode) ----
+    private class Star(val x: Float, val y: Float, val size: Float, val phase: Float, val speed: Float)
+
+    private fun makeStars(n: Int, seed: Long): List<Star> {
+        val r = java.util.Random(seed)
+        return List(n) {
+            Star(r.nextFloat(), r.nextFloat(), 0.6f + r.nextFloat() * r.nextFloat() * 2.6f,
+                r.nextFloat() * 6.283f, 0.6f + r.nextFloat() * 1.6f)
+        }
+    }
+    private val pictureStars = makeStars(90, 7L)    // drawn in the picture (move with the panel, get fogged)
+    private val fogStars = makeStars(28, 42L)       // floating in the fog, toward the far edge
+    private val starPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+
+    /** Draws twinkling stars; xRange limits where they appear (0..1 of width). */
+    private fun drawStars(canvas: Canvas, stars: List<Star>, w: Float, h: Float, alphaAt: (Float) -> Float) {
+        val d = resources.displayMetrics.density
+        val t = android.os.SystemClock.uptimeMillis() / 1000f
+        for (st in stars) {
+            val a = alphaAt(st.x)
+            if (a <= 0.01f) continue
+            val tw = 0.55f + 0.45f * kotlin.math.sin(t * st.speed * 2.4f + st.phase)
+            val alpha = (a * tw).coerceIn(0f, 1f)
+            val cx = st.x * w
+            val cy = st.y * h
+            val r = st.size * d
+            starPaint.alpha = (alpha * 255).toInt()
+            canvas.drawCircle(cx, cy, r * 0.55f, starPaint)
+            if (st.size > 1.6f) {
+                // four-point sparkle for the bigger stars
+                starPaint.alpha = (alpha * 170).toInt()
+                starPaint.strokeWidth = r * 0.22f
+                val l = r * 2.6f * tw
+                canvas.drawLine(cx - l, cy, cx + l, cy, starPaint)
+                canvas.drawLine(cx, cy - l, cx, cy + l, starPaint)
+            }
+        }
+    }
+
     /** Average colour of the wallpaper, used as the fog colour. */
     private var fogColor = Color.rgb(34, 30, 46)
 
@@ -439,6 +478,9 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                 canvas.drawRoundRect(rect, r, r, glassFallback)   // no wallpaper: deep dark glass
             }
             // no tint or border: the wallpaper itself melts into blur and darkness
+            // star sparkles in the picture (fainter on a real wallpaper, brighter on the placeholder)
+            val base = if (wp != null) 0.55f else 0.9f
+            drawStars(canvas, pictureStars, nw, nh) { base }
         }
 
         /** The cover screen's picture, filling the swinging half (center-crop), fading out. */
@@ -549,6 +591,12 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                 val colors = IntArray(stops.size) { Color.argb((a[it] * hz * 255).roundToInt(), 16, 12, 26) }
                 paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
                 canvas.drawRect(0f, 0f, w, h, paint)
+                // sparkles floating in the fog: x here is the screen position, mapped to v
+                drawStars(canvas, fogStars, w, h) { xf ->
+                    val v = if (movingLeft) 1f - xf else xf
+                    ((v - 0.55f) / 0.45f).coerceIn(0f, 1f) * hz * 0.85f
+                }
+                invalidate()   // keep twinkling while the fog is visible
             }
             val aw = away.coerceIn(0f, 1f)
             if (aw > 0.003f) {
