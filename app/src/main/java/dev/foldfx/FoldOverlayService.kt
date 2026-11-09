@@ -508,7 +508,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         p.movingLeft = movingLeft
         if (p.snapshot !== snapshot) p.snapshot = snapshot
         p.coverage = appear
-        p.update(fold, strength, maxBlur, 0.7f)
+        p.update(fold, strength, maxBlur, 0.7f, Prefs.projection(this) / 100f)
     }
 
     private fun removePanel() {

@@ -83,8 +83,13 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         setWillNotDraw(false)
     }
 
-    fun update(fold: Float, strength: Float, maxBlur: Float, dimMax: Float) {
-        computeMatrix(fold)
+    /**
+     * lock: 0..1, how much the content stays fixed in space (1 = fully fixed, which stretches a
+     * lot; small values keep the content close to its normal scale, like the iPhone).
+     */
+    fun update(fold: Float, strength: Float, maxBlur: Float, dimMax: Float, lock: Float) {
+        // Partial lock, and never more than 50° of compensation (max stretch about 1.5x)
+        computeMatrix((fold * lock.coerceIn(0f, 1f)).coerceAtMost(50f))
         val step = 1f / (LAYERS - 1)
         for (k in 0 until LAYERS) {
             val vk = k * step

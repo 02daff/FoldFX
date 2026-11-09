@@ -20,4 +20,12 @@ object Prefs {
     fun setMovingHalfLeft(c: Context, value: Boolean) {
         c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean("left", value).apply()
     }
+
+    /** How much the content stays fixed in space while the half swings, 0..100 %. */
+    fun projection(c: Context): Int =
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt("proj", 35)
+
+    fun setProjection(c: Context, value: Int) {
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("proj", value).apply()
+    }
 }

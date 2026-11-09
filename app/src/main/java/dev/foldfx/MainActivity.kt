@@ -33,6 +33,7 @@ class MainActivity : Activity(), SensorEventListener {
     private lateinit var blurLabel: TextView
     private lateinit var logText: TextView
     private lateinit var halfButton: Button
+    private lateinit var projLabel: TextView
     private val logUpdater = object : Runnable {
         override fun run() {
             logText.text = FoldOverlayService.logText().ifEmpty { "(nothing yet)" }
@@ -120,6 +121,21 @@ class MainActivity : Activity(), SensorEventListener {
             })
         })
 
+        projLabel = TextView(this).apply { setPadding(0, pad, 0, 0) }
+        col.addView(projLabel)
+        col.addView(SeekBar(this).apply {
+            max = 100
+            progress = Prefs.projection(this@MainActivity)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, value: Int, fromUser: Boolean) {
+                    Prefs.setProjection(this@MainActivity, value)
+                    projLabel.text = "Content stays fixed in space: $value%"
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        })
+
         col.addView(button("Turn off battery optimization (keeps it running)") {
             startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         })
@@ -199,6 +215,7 @@ class MainActivity : Activity(), SensorEventListener {
             append("\nFold the phone slowly and watch the angle above. It should change smoothly.")
         }
         blurLabel.text = "Max blur: ${Prefs.maxBlur(this)} px"
+        projLabel.text = "Content stays fixed in space: ${Prefs.projection(this)}%"
         halfButton.text = "Half that swings: " + (if (Prefs.movingHalfLeft(this)) "left" else "right") + " (tap to change)"
     }
 
