@@ -65,6 +65,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
         private const val CHANNEL = "foldfx"
         private const val STRIPS = 8
+        private const val FLAT_AT = 175f            // hinge angle treated as fully open
+        private const val START_BELOW = 173f        // effect starts only below this angle
         private const val FULL_EFFECT_AT = 40f      // effect is at full strength 40° away from flat
         private const val IDLE_FADE_MS = 1200L      // held still half-open this long -> fade out
         private const val COVER_SWEEP_MS = 650f     // cover screen sharpening sweep
@@ -185,7 +187,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         }
         if (abs(a - targetAngle) > 0.3f) {
             lastMoveAt = now
-            if (!animating && !isCover(screenW, screenH) && a < 178.5f) {
+            if (!animating && !isCover(screenW, screenH) && a < START_BELOW) {
                 log("folding from ${targetAngle.roundToInt()}°")
                 begin()
             }
@@ -360,7 +362,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             // A quick fold-and-back is held briefly (decays at 300°/s) so it is always seen.
             val dt = (now - lastTickAt).coerceIn(1L, 50L) / 1000f
             lastTickAt = now
-            val rawFold = (180f - angle).coerceIn(0f, 179f)
+            // Anything at or above FLAT_AT counts as fully open (the N5 rests at about 177-178°)
+            val rawFold = ((FLAT_AT - angle).coerceAtLeast(0f) * (180f / FLAT_AT)).coerceIn(0f, 179f)
             peakFold = if (preview) rawFold else maxOf(rawFold, peakFold - 300f * dt)
             val fold = peakFold
             // grows all the way from flat to closed (fast at first, then keeps building)
