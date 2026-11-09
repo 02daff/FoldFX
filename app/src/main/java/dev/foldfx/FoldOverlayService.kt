@@ -183,29 +183,6 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             log("hinge at ${a.roundToInt()}°")
             return
         }
-        if (isCover(screenW, screenH) && a > targetAngle + 0.3f && a in 2f..60f &&
-            now - coverAskedAt > 800L && FoldAccessibilityService.instance != null
-        ) {
-            // Opening from the cover screen: grab its picture before the big screen turns on
-            coverAskedAt = now
-            FoldAccessibilityService.capture { bmp ->
-                if (bmp != null && isCover(bmp.width, bmp.height)) {
-                    coverShot?.recycle()
-                    coverShot = bmp
-                    coverShotAt = SystemClock.uptimeMillis()
-                    log("cover picture ${bmp.width}x${bmp.height} in ${coverShotAt - now} ms")
-                    // Arrived just after the big screen turned on: still use it
-                    if (animating && !openingFromCover && !isCover(screenW, screenH) &&
-                        coverShotAt - switchedToInnerAt < 600L
-                    ) {
-                        openingFromCover = true
-                        log("opening: using cover picture (late)")
-                    }
-                } else {
-                    bmp?.recycle()
-                }
-            }
-        }
         if (abs(a - targetAngle) > 0.3f) {
             lastMoveAt = now
             if (!animating && !isCover(screenW, screenH) && a < 178.5f) {
@@ -238,13 +215,12 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         removePanel()
         clearSnapshot()
         if (nowCover) {
-            coverSweepAt = SystemClock.uptimeMillis()
-            begin()
+            // No effect on the cover screen: just end cleanly
+            if (animating) finish()
         } else {
             coverSweepAt = 0L
             switchedToInnerAt = SystemClock.uptimeMillis()
-            openingFromCover = coverShot != null && SystemClock.uptimeMillis() - coverShotAt < 4000L
-            log(if (openingFromCover) "opening: using cover picture" else "opening: no recent cover picture")
+            openingFromCover = false   // opening plays the closing animation in reverse
             ensurePanel()
             lastMoveAt = SystemClock.uptimeMillis()
             shownAngle = targetAngle
