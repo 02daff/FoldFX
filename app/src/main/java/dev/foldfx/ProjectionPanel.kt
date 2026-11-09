@@ -119,6 +119,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     private var wallShaderFor = -1
     private val wallMatrix = Matrix()
     private val glassFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(70, 160, 160, 168) }
+    private val glassFallback = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(34, 30, 46) }
     private val glassEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         color = Color.argb(150, 255, 255, 255)
@@ -284,9 +285,10 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val save = canvas.saveLayer(0f, 0f, w, h, null)
             super.dispatchDraw(canvas)
             val c = coverage.coerceIn(0f, 1f)
-            val stops = if (glassMode) floatArrayOf(0f, GLASS_START, 0.46f, 0.55f, 0.7f, 1f)
+            val stops = if (glassMode) floatArrayOf(0f, GLASS_START, 0.47f, 0.52f, 0.7f, 1f)
                 else floatArrayOf(0f, 0.2f, 0.4f, 0.5f, 0.6f, 1f)
-            val alphas = if (glassMode) floatArrayOf(0f, 0f, 0.22f, 0.5f, 0.82f, 1f)
+            // glass: soft lead-in on the flat side only, fully covered from just past the hinge
+            val alphas = if (glassMode) floatArrayOf(0f, 0f, 0.65f, 1f, 1f, 1f)
                 else floatArrayOf(0f, 0.12f, 0.55f, 0.85f, 1f, 1f)
             val colors = IntArray(stops.size) { Color.argb((alphas[it] * c * 255).roundToInt(), 0, 0, 0) }
             fadePaint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
@@ -403,7 +405,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                 snapPaint.shader = shader
                 canvas.drawRoundRect(rect, r, r, snapPaint)
             } else {
-                canvas.drawRoundRect(rect, r, r, grey)
+                canvas.drawRoundRect(rect, r, r, glassFallback)   // no wallpaper: deep dark glass
             }
             // no tint or border: the wallpaper itself melts into blur and darkness
         }
