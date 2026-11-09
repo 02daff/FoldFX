@@ -73,6 +73,8 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     var movingLeft = true
     /** 0..1: how strongly the effect covers the screen (fades in off flat). */
     var coverage = 0f
+    /** 0..1: how far the effect has swept in, from the flat side across the hinge to the edge. */
+    var reveal = 1f
 
     /** Real screenshot (in current screen orientation); null = grey placeholder. */
     var snapshot: Bitmap? = null
@@ -114,7 +116,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             field = value
             wallShader = value?.let { makeShader(it) }
             wallShaderFor = -1
-            fogColor = value?.let { averageColor(it) } ?: Color.rgb(34, 30, 46)
+            fogColor = value?.let { averageColor(it) } ?: Color.rgb(240, 242, 247)
         }
     // ---- star sparkles (glass mode) ----
     private class Star(val x: Float, val y: Float, val size: Float, val phase: Float, val speed: Float)
@@ -142,13 +144,16 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val cx = st.x * w
             val cy = st.y * h
             val r = st.size * d
-            starPaint.alpha = (alpha * 60).toInt()
-            canvas.drawCircle(cx, cy, r * 1.7f, starPaint)          // soft glow
+            starPaint.color = Color.rgb(120, 150, 255)
+            starPaint.alpha = (alpha * 95).toInt()
+            canvas.drawCircle(cx, cy, r * 1.9f, starPaint)          // soft blue glow (shows on white frost)
+            starPaint.color = Color.WHITE
             starPaint.alpha = (alpha * 255).toInt()
             canvas.drawCircle(cx, cy, r * 0.65f, starPaint)         // bright core
             if (st.size > 1.8f) {
                 // four-point sparkle for the bigger stars
-                starPaint.alpha = (alpha * 210).toInt()
+                starPaint.color = Color.rgb(200, 215, 255)
+                starPaint.alpha = (alpha * 230).toInt()
                 starPaint.strokeWidth = r * 0.22f
                 val l = r * 2.6f * tw
                 canvas.drawLine(cx - l, cy, cx + l, cy, starPaint)
@@ -158,7 +163,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     }
 
     /** Average colour of the wallpaper, used as the fog colour. */
-    private var fogColor = Color.rgb(34, 30, 46)
+    private var fogColor = Color.rgb(240, 242, 247)
 
     private fun averageColor(b: Bitmap): Int {
         var r = 0L; var g = 0L; var bl = 0L; var n = 0
@@ -175,14 +180,19 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             y += sy
         }
         if (n == 0) return Color.rgb(34, 30, 46)
-        // slightly darker than the average, so the fog stays moody like the iPhone
-        return Color.rgb((r / n * 0.8f).toInt(), (g / n * 0.8f).toInt(), (bl / n * 0.8f).toInt())
+        // white frost with just a hint of the wallpaper's colour
+        val mix = 0.78f
+        return Color.rgb(
+            ((r / n) * (1 - mix) + 245 * mix).toInt(),
+            ((g / n) * (1 - mix) + 246 * mix).toInt(),
+            ((bl / n) * (1 - mix) + 250 * mix).toInt()
+        )
     }
     private var wallShader: BitmapShader? = null
     private var wallShaderFor = -1
     private val wallMatrix = Matrix()
     private val glassFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(70, 160, 160, 168) }
-    private val glassFallback = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(34, 30, 46) }
+    private val glassFallback = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(226, 229, 236) }
     private val glassEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         color = Color.argb(150, 255, 255, 255)
@@ -365,6 +375,16 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val colors = IntArray(stops.size) { Color.argb((alphas[it] * c * 255).roundToInt(), 0, 0, 0) }
             fadePaint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
             canvas.drawRect(0f, 0f, w, h, fadePaint)
+            // Sweep: visible up to a front that moves from the flat side out to the folding edge
+            val rv = reveal.coerceIn(0f, 1f)
+            if (rv < 0.999f) {
+                val feather = 0.12f
+                val front = GLASS_START + (1f + feather - GLASS_START) * rv
+                val x0 = natX((front - feather).coerceIn(0f, 1f))
+                val x1 = natX(front.coerceIn(0f, 1f))
+                fadePaint.shader = LinearGradient(x0, 0f, x1, 0f, Color.BLACK, Color.TRANSPARENT, Shader.TileMode.CLAMP)
+                canvas.drawRect(0f, 0f, w, h, fadePaint)
+            }
             canvas.restoreToCount(save)
         }
     }
@@ -413,11 +433,12 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         private val rect = RectF()
 
         fun setBlur(b: Float) {
-            val r = (b / 2f).roundToInt() * 2
+            val r = (b * 2f).roundToInt()          // half-pixel steps, so the blur changes smoothly
             if (r != blur && Build.VERSION.SDK_INT >= 31) {
                 blur = r
+                val rad = r / 2f
                 setRenderEffect(
-                    if (r > 0) RenderEffect.createBlurEffect(r.toFloat(), r.toFloat(), Shader.TileMode.CLAMP)
+                    if (rad > 0.25f) RenderEffect.createBlurEffect(rad, rad, Shader.TileMode.CLAMP)
                     else null
                 )
             }
@@ -581,7 +602,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             if (hz > 0.003f) {
                 val stops = floatArrayOf(0f, GLASS_START, 0.55f, 0.75f, 1f)
                 // fog in the wallpaper's own colour: flattens contrast so shapes lose their edges
-                val fa = floatArrayOf(0f, 0f, 0.22f, 0.45f, 0.62f)
+                val fa = floatArrayOf(0f, 0f, 0.30f, 0.55f, 0.78f)   // milky frost thickening outward
                 val fc = fogColor
                 val fogColors = IntArray(stops.size) {
                     Color.argb((fa[it] * hz * 255).roundToInt(), Color.red(fc), Color.green(fc), Color.blue(fc))
@@ -589,7 +610,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                 paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, fogColors, stops, Shader.TileMode.CLAMP)
                 canvas.drawRect(0f, 0f, w, h, paint)
                 // then a lighter dark tint deepening toward the far edge
-                val a = floatArrayOf(0f, 0f, 0.08f, 0.25f, 0.5f)
+                val a = floatArrayOf(0f, 0f, 0f, 0f, 0f)   // no dark tint: white frosted glass
                 val colors = IntArray(stops.size) { Color.argb((a[it] * hz * 255).roundToInt(), 16, 12, 26) }
                 paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
                 canvas.drawRect(0f, 0f, w, h, paint)

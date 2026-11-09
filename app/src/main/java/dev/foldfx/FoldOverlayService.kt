@@ -123,6 +123,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     @Volatile private var velocity = 0f            // degrees per second
     @Volatile private var evtCount = 0
     private var lastTickAt = 0L
+    private var lastSmoothAt = 0L
+    private var lastRevealValue = 0f
     private var preview = false
     private var previewStart = 0L
     private var coverSweepAt = 0L
@@ -200,7 +202,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             val dt = (ts - prevTs) / 1e9f
             if (dt in 0.002f..0.25f) {
                 val inst = (a - evtAngle) / dt
-                velocity = 0.6f * inst + 0.4f * velocity
+                velocity = 0.35f * inst + 0.65f * velocity   // steadier, no overshoot
             } else {
                 velocity = 0f
             }
@@ -481,7 +483,11 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 angle = 180f - 110f * smooth(tri.coerceIn(0f, 1f))
                 shownAngle = angle
             } else {
-                shownAngle += (predictedAngle() - shownAngle) * 0.9f   // near real time
+                // time-based smoothing (~50 ms): even motion however the readings arrive
+                val dtS = ((now - lastSmoothAt).coerceIn(1L, 50L)) / 1000f
+                lastSmoothAt = now
+                val k = 1f - kotlin.math.exp(-dtS / 0.05f)
+                shownAngle += (predictedAngle() - shownAngle) * k
                 angle = shownAngle
             }
             val still = !preview && now - lastMoveAt > IDLE_FADE_MS
@@ -498,13 +504,20 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             // grows all the way from flat to closed (fast at first, then keeps building)
             // full blur by a hinge reading of 80° (fold 100°)
             val strength = (fold / 100f).coerceIn(0f, 1f).pow(0.6f) * fade
-            val appear = smooth((fold / 8f).coerceIn(0f, 1f)) * fade         // solid within the first 8° of folding
+            // Near flat and no longer moving: end quickly instead of lingering
+            val nearFlat = !preview && rawFold < 6f && now - lastMoveAt > 250L
+            if (nearFlat) fade += (0f - fade) * 0.35f
+            // The glass sweeps in from the flat half across the hinge to the folding edge
+            val reveal = smooth((fold / 25f).coerceIn(0f, 1f))
+            val appear = fade
             for (i in 0 until STRIPS) {
                 val x = (i + 0.5f) / STRIPS                 // 0 = at hinge, 1 = outer edge
                 blur[i] = maxBlur * strength * (0.15f + 0.85f * x * x)
                 dim[i] = 0.65f * strength * (0.35f + 0.65f * x)
             }
+            lastRevealValue = reveal
             done = if (preview) now - previewStart >= PREVIEW_MS
+            else if (nearFlat && fade < 0.02f) true
             else (peakFold < 1f && rawFold < 1.5f && abs(targetAngle - shownAngle) < 0.5f) || (still && fade < 0.02f)
 
             if (!done) {
@@ -653,6 +666,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         p.coverMix = if (cover != null) 1f - smooth(((180f - fold) - 60f) / 70f) else 0f
         if (p.cornerRadius == 0f) p.cornerRadius = screenCornerRadius()
         p.coverage = appear
+        p.reveal = lastRevealValue
         p.update(fold, strength, maxBlur, 0.7f, Prefs.projection(this) / 100f)
     }
 
