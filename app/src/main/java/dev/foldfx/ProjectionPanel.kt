@@ -73,6 +73,10 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     var movingLeft = true
     /** 0..1: how strongly the effect covers the screen (fades in off flat). */
     var coverage = 0f
+    /** 0..1: strength of the white frost (set every frame). */
+    private var hazeAmount = 0f
+    private val frostPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
     /** 0..1: how far the effect has swept in, from the flat side across the hinge to the edge. */
     var reveal = 1f
 
@@ -340,6 +344,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         fun update(strength: Float, maxBlur: Float, dimMax: Float, haze: Float, away: Float) {
             dimView.haze = haze
             dimView.away = away
+            hazeAmount = haze
             if (glassMode) {
                 // Fog: all layers spread from the split to the far edge, blur growing to ~2x max
                 val step = (1f - GLASS_START) / (LAYERS - 1)
@@ -501,6 +506,18 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                 canvas.drawRoundRect(rect, r, r, glassFallback)   // no wallpaper: deep dark glass
             }
             // no tint or border: the wallpaper itself melts into blur and darkness
+            // white frost on the picture only (not on the black void), thickening outward
+            val hz = hazeAmount.coerceIn(0f, 1f)
+            if (hz > 0.003f) {
+                val stops = floatArrayOf(0f, GLASS_START, 0.55f, 0.75f, 1f)
+                val fa = floatArrayOf(0f, 0f, 0.30f, 0.55f, 0.78f)
+                val fc = fogColor
+                val cols = IntArray(stops.size) {
+                    Color.argb((fa[it] * hz * 255).roundToInt(), Color.red(fc), Color.green(fc), Color.blue(fc))
+                }
+                frostPaint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, cols, stops, Shader.TileMode.CLAMP)
+                canvas.drawRoundRect(rect, r, r, frostPaint)
+            }
             // star sparkles in the picture (fainter on a real wallpaper, brighter on the placeholder)
             val base = if (wp != null) 0.75f else 1f
             drawStars(canvas, pictureStars, nw, nh) { base }
@@ -600,20 +617,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val h = height.toFloat()
             val hz = haze.coerceIn(0f, 1f)
             if (hz > 0.003f) {
-                val stops = floatArrayOf(0f, GLASS_START, 0.55f, 0.75f, 1f)
-                // fog in the wallpaper's own colour: flattens contrast so shapes lose their edges
-                val fa = floatArrayOf(0f, 0f, 0.30f, 0.55f, 0.78f)   // milky frost thickening outward
-                val fc = fogColor
-                val fogColors = IntArray(stops.size) {
-                    Color.argb((fa[it] * hz * 255).roundToInt(), Color.red(fc), Color.green(fc), Color.blue(fc))
-                }
-                paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, fogColors, stops, Shader.TileMode.CLAMP)
-                canvas.drawRect(0f, 0f, w, h, paint)
-                // then a lighter dark tint deepening toward the far edge
-                val a = floatArrayOf(0f, 0f, 0f, 0f, 0f)   // no dark tint: white frosted glass
-                val colors = IntArray(stops.size) { Color.argb((a[it] * hz * 255).roundToInt(), 16, 12, 26) }
-                paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
-                canvas.drawRect(0f, 0f, w, h, paint)
+                // (the white frost itself is drawn inside the picture, so the black void stays black)
                 // sparkles floating in the fog: x here is the screen position, mapped to v
                 drawStars(canvas, fogStars, w, h) { xf ->
                     val v = if (movingLeft) 1f - xf else xf
