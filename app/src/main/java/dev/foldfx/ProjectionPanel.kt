@@ -98,6 +98,20 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         if (Build.VERSION.SDK_INT >= 31) BitmapShader(b, Shader.TileMode.DECAL, Shader.TileMode.DECAL)
         else BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
 
+    /** Picture of the cover screen, shown on the swinging half right after opening. */
+    var coverPic: Bitmap? = null
+        set(value) {
+            field = value
+            coverShader = value?.let { makeShader(it) }
+        }
+    private var coverShader: BitmapShader? = null
+    /** true while opening from the cover screen (no fade to black). */
+    var opening = false
+    /** 0..1: how much of the cover picture is still showing (1 = only cover, 0 = gone). */
+    var coverMix = 0f
+    private val coverPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val coverMatrix = Matrix()
+
     /** Corner radius of the real screen, so the floating picture has the same rounded corners. */
     var cornerRadius = 0f
 
@@ -158,8 +172,9 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         // picture looks smaller inside the moving frame and black void opens around it.
         // Keeps moving smoothly all the way to 90°, then the panel fades to dark.
         computeMatrix(fold.coerceAtMost(90f), lock.coerceIn(0f, 1f))
-        // Fade to black between hinge readings 80° and 60° (fold 100° -> 120°)
-        val away = smoothstep((fold - 100f) / 20f)
+        // Fade to black between hinge readings 80° and 60° (fold 100° -> 120°).
+        // Not when opening from the cover screen: then the cover picture should be seen.
+        val away = if (opening) 0f else smoothstep((fold - 100f) / 20f)
         frame.update(strength, maxBlur, dimMax + (1f - dimMax) * away)
     }
 
@@ -325,7 +340,27 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             canvas.drawColor(Color.BLACK)
             canvas.concat(this@ProjectionPanel.projMatrix)
             drawPicture(canvas)
+            drawCoverPicture(canvas, half, h)
             canvas.restore()
+        }
+
+        /** The cover screen's picture, filling the swinging half (center-crop), fading out. */
+        private fun drawCoverPicture(canvas: Canvas, half: Float, h: Float) {
+            val bmp = coverPic ?: return
+            val shader = coverShader ?: return
+            val mix = coverMix.coerceIn(0f, 1f)
+            if (mix < 0.01f || bmp.isRecycled) return
+            val left = if (movingLeft) 0f else half
+            rect.set(left, 0f, left + half, h)
+            val sc = maxOf(half / bmp.width, h / bmp.height)
+            val dx = left + (half - bmp.width * sc) / 2f
+            val dy = (h - bmp.height * sc) / 2f
+            coverMatrix.setScale(sc, sc)
+            coverMatrix.postTranslate(dx, dy)
+            shader.setLocalMatrix(coverMatrix)
+            coverPaint.shader = shader
+            coverPaint.alpha = (mix * 255).toInt()
+            canvas.drawRoundRect(rect, cornerRadius, cornerRadius, coverPaint)
         }
 
         /** Draws the picture in natural-frame coordinates. */
@@ -351,6 +386,8 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                 canvas.restore()
                 return
             }
+            // No screenshot (yet): draw nothing, so the real screen shows through
+            if (bmp == null) return
             rect.set(0f, 0f, nw, nh)
             canvas.drawRoundRect(rect, cornerRadius, cornerRadius, grey)
             val cols = 8

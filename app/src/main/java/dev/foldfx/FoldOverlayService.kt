@@ -93,6 +93,13 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private var snapAskedAt = 0L
     private var snapshot: android.graphics.Bitmap? = null
     private var panelHost: WindowManager? = null
+
+    // cover screen picture for the opening transition
+    private var coverShot: android.graphics.Bitmap? = null
+    private var coverShotAt = 0L
+    private var coverAskedAt = 0L
+    private var openingFromCover = false
+    private var switchedToInnerAt = 0L
     private var panel: ProjectionPanel? = null
     private var panelParams: WindowManager.LayoutParams? = null
 
@@ -176,6 +183,29 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             log("hinge at ${a.roundToInt()}°")
             return
         }
+        if (isCover(screenW, screenH) && a > targetAngle + 0.3f && a in 2f..60f &&
+            now - coverAskedAt > 800L && FoldAccessibilityService.instance != null
+        ) {
+            // Opening from the cover screen: grab its picture before the big screen turns on
+            coverAskedAt = now
+            FoldAccessibilityService.capture { bmp ->
+                if (bmp != null && isCover(bmp.width, bmp.height)) {
+                    coverShot?.recycle()
+                    coverShot = bmp
+                    coverShotAt = SystemClock.uptimeMillis()
+                    log("cover picture ${bmp.width}x${bmp.height} in ${coverShotAt - now} ms")
+                    // Arrived just after the big screen turned on: still use it
+                    if (animating && !openingFromCover && !isCover(screenW, screenH) &&
+                        coverShotAt - switchedToInnerAt < 600L
+                    ) {
+                        openingFromCover = true
+                        log("opening: using cover picture (late)")
+                    }
+                } else {
+                    bmp?.recycle()
+                }
+            }
+        }
         if (abs(a - targetAngle) > 0.3f) {
             lastMoveAt = now
             if (!animating && !isCover(screenW, screenH) && a < 178.5f) {
@@ -212,6 +242,9 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             begin()
         } else {
             coverSweepAt = 0L
+            switchedToInnerAt = SystemClock.uptimeMillis()
+            openingFromCover = coverShot != null && SystemClock.uptimeMillis() - coverShotAt < 4000L
+            log(if (openingFromCover) "opening: using cover picture" else "opening: no recent cover picture")
             ensurePanel()
             lastMoveAt = SystemClock.uptimeMillis()
             shownAngle = targetAngle
@@ -302,6 +335,12 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         hidePanel()
         unlockOrientation()
         clearSnapshot()
+        panel?.coverPic = null
+        if (openingFromCover) {
+            coverShot?.recycle()
+            coverShot = null
+        }
+        openingFromCover = false
     }
 
     private fun tick() {
@@ -491,6 +530,11 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         p.rotation90 = displays.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: 0
         p.movingLeft = movingLeft
         if (p.snapshot !== snapshot) p.snapshot = snapshot
+        val cover = if (openingFromCover) coverShot else null
+        p.opening = openingFromCover
+        if (p.coverPic !== cover) p.coverPic = cover
+        // cover picture fades into the big screen between hinge readings 60° and 130°
+        p.coverMix = if (cover != null) 1f - smooth(((180f - fold) - 60f) / 70f) else 0f
         if (p.cornerRadius == 0f) p.cornerRadius = screenCornerRadius()
         p.coverage = appear
         p.update(fold, strength, maxBlur, 0.7f, Prefs.projection(this) / 100f)
