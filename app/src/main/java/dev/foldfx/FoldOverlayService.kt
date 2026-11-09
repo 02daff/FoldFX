@@ -159,7 +159,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         return Pair(b.width().coerceAtLeast(2), b.height().coerceAtLeast(2))
     }
 
-    private fun isCover(w: Int, h: Int) = w < h * 0.75f
+    /** Cover screen is long and narrow in any rotation; the big screen is nearly square. */
+    private fun isCover(w: Int, h: Int) = minOf(w, h) < maxOf(w, h) * 0.75f
 
     // ---- hinge ----
 
@@ -505,6 +506,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         }
         p.screenW = screenW
         p.screenH = screenH
+        p.rotation90 = displays.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: 0
         p.movingLeft = movingLeft
         if (p.snapshot !== snapshot) p.snapshot = snapshot
         p.coverage = appear
