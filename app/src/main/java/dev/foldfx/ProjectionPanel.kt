@@ -52,7 +52,11 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     var snapshot: Bitmap? = null
         set(value) {
             field = value
-            snapShader = value?.let { BitmapShader(it, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP) }
+            snapShader = value?.let {
+                // DECAL: transparent outside the picture, so the black void shows there
+                if (Build.VERSION.SDK_INT >= 31) BitmapShader(it, Shader.TileMode.DECAL, Shader.TileMode.DECAL)
+                else BitmapShader(it, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            }
             snapShaderFor = -1
         }
     private var snapShader: BitmapShader? = null
@@ -88,8 +92,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
      * lot; small values keep the content close to its normal scale, like the iPhone).
      */
     fun update(fold: Float, strength: Float, maxBlur: Float, dimMax: Float, lock: Float) {
-        // Partial lock, and never more than 50° of compensation (max stretch about 1.5x)
-        computeMatrix((fold * lock.coerceIn(0f, 1f)).coerceAtMost(50f))
+        computeMatrix(fold * lock.coerceIn(0f, 1f))
         val step = 1f / (LAYERS - 1)
         for (k in 0 until LAYERS) {
             val vk = k * step
@@ -139,7 +142,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         val phi = Math.toRadians(foldDeg.toDouble())
         val c = cos(phi).toFloat()
         val s = sin(phi).toFloat()
-        val zc = 2.5f * screenW
+        val zc = 2.2f * screenW
         curCos = c; curSin = s; curZc = zc
         val cy = h / 2f
         val ds = floatArrayOf(0f, half, half, 0f)
@@ -228,6 +231,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             // swinging half
             canvas.save()
             if (movingLeft) canvas.clipRect(0f, 0f, half, h) else canvas.clipRect(half, 0f, w, h)
+            canvas.drawColor(Color.BLACK)      // the void outside the flat picture
             canvas.concat(this@ProjectionPanel.projMatrix)
             drawPlaceholderUi(canvas)
             canvas.restore()
@@ -247,10 +251,10 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                     snapShaderFor = key
                 }
                 snapPaint.shader = shader
-                canvas.drawRect(-sw, -sh, sw * 2f, sh * 2f, snapPaint)
+                canvas.drawRect(0f, 0f, sw, sh, snapPaint)
                 return
             }
-            canvas.drawRect(-sw, -sh, sw * 2f, sh * 2f, grey)
+            canvas.drawRect(0f, 0f, sw, sh, grey)
             val cols = 8
             val pad = sw * 0.04f
             val size = (sw - pad * (cols + 1)) / cols

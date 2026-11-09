@@ -23,9 +23,9 @@ object Prefs {
 
     /** How much the content stays fixed in space while the half swings, 0..100 %. */
     fun projection(c: Context): Int =
-        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt("proj", 35)
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt("proj2", 100)
 
     fun setProjection(c: Context, value: Int) {
-        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("proj", value).apply()
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("proj2", value).apply()
     }
 }
