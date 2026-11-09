@@ -36,4 +36,20 @@ object Prefs {
     fun setGlassMode(c: Context, value: Boolean) {
         c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean("glass", value).apply()
     }
+
+    /** Glass material: 0 light frost, 1 liquid glass, 2 smoked glass, 3 tinted glass, 4 clear blur. */
+    fun material(c: Context): Int =
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt("material", 1)
+
+    fun setMaterial(c: Context, value: Int) {
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("material", value).apply()
+    }
+
+    /** How the effect appears: 0 sweep, 1 blur-in, 2 soft fade, 3 depth. */
+    fun entrance(c: Context): Int =
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt("entrance", 1)
+
+    fun setEntrance(c: Context, value: Int) {
+        c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putInt("entrance", value).apply()
+    }
 }

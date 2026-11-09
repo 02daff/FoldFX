@@ -125,6 +125,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private var lastTickAt = 0L
     private var lastSmoothAt = 0L
     private var lastRevealValue = 0f
+    private var lastDepthScale = 1f
     private var preview = false
     private var previewStart = 0L
     private var coverSweepAt = 0L
@@ -507,9 +508,15 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             // Near flat and no longer moving: end quickly instead of lingering
             val nearFlat = !preview && rawFold < 6f && now - lastMoveAt > 250L
             if (nearFlat) fade += (0f - fade) * 0.35f
-            // The glass sweeps in from the flat half across the hinge to the folding edge
-            val reveal = smooth((fold / 25f).coerceIn(0f, 1f))
-            val appear = fade
+            // Entrance style: 0 sweep, 1 blur-in, 2 soft fade, 3 depth
+            val entrance = Prefs.entrance(this)
+            val reveal = if (entrance == 0) smooth((fold / 25f).coerceIn(0f, 1f)) else 1f
+            val appear = fade * when (entrance) {
+                2 -> smooth((fold / 15f).coerceIn(0f, 1f))
+                3 -> smooth((fold / 20f).coerceIn(0f, 1f))
+                else -> 1f
+            }
+            lastDepthScale = if (entrance == 3) 1.05f - 0.05f * smooth((fold / 20f).coerceIn(0f, 1f)) else 1f
             for (i in 0 until STRIPS) {
                 val x = (i + 0.5f) / STRIPS                 // 0 = at hinge, 1 = outer edge
                 blur[i] = maxBlur * strength * (0.15f + 0.85f * x * x)
@@ -667,6 +674,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         if (p.cornerRadius == 0f) p.cornerRadius = screenCornerRadius()
         p.coverage = appear
         p.reveal = lastRevealValue
+        p.depthScale = lastDepthScale
+        p.material = Prefs.material(this)
         p.update(fold, strength, maxBlur, 0.7f, Prefs.projection(this) / 100f)
     }
 

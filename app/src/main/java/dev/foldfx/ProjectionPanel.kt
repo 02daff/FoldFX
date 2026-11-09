@@ -73,6 +73,28 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     var movingLeft = true
     /** 0..1: how strongly the effect covers the screen (fades in off flat). */
     var coverage = 0f
+    /** Glass material: 0 light frost, 1 liquid glass, 2 smoked glass, 3 tinted glass, 4 clear blur. */
+    var material = 1
+    /** Depth entrance: the whole effect is drawn slightly larger and settles to 1. */
+    var depthScale = 1f
+    private var strengthNow = 0f
+    /** Average colour of the current picture (screenshot or wallpaper), used by tinted glass. */
+    private var pictureAvg = Color.rgb(120, 110, 210)
+    private val materialPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val colorMatrix = android.graphics.ColorMatrix()
+    private val tmpMatrix = android.graphics.ColorMatrix()
+
+    private class Material(val r: Int, val g: Int, val b: Int, val alpha: Float, val sat: Float, val bri: Float, val rim: Float)
+
+    private fun mat(): Material = when (material) {
+        0 -> Material(240, 242, 247, 0.38f, 1f, 1.05f, 0f)       // light frost
+        2 -> Material(18, 16, 28, 0.55f, 0.9f, 0.9f, 0f)          // smoked glass
+        3 -> Material(Color.red(pictureAvg), Color.green(pictureAvg), Color.blue(pictureAvg), 0.32f, 1.2f, 1f, 0.4f) // tinted
+        4 -> Material(0, 0, 0, 0f, 1f, 1f, 0f)                    // clear blur
+        else -> Material(255, 255, 255, 0.08f, 1.5f, 1.08f, 1f)   // liquid glass
+    }
+
     /** 0..1: strength of the white frost (set every frame). */
     private var hazeAmount = 0f
     private val frostPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -91,6 +113,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             }
             snapShader = value?.let { makeShader(it) }
             snapSmallShader = snapSmall?.let { makeShader(it) }
+            value?.let { pictureAvg = rawAverage(it) }
             snapShaderFor = -1
             snapSmallShaderFor = -1
         }
@@ -121,6 +144,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             wallShader = value?.let { makeShader(it) }
             wallShaderFor = -1
             fogColor = value?.let { averageColor(it) } ?: Color.rgb(240, 242, 247)
+            value?.let { pictureAvg = rawAverage(it) }
         }
     // ---- star sparkles (glass mode) ----
     private class Star(val x: Float, val y: Float, val size: Float, val phase: Float, val speed: Float)
@@ -164,6 +188,29 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                 canvas.drawLine(cx, cy - l, cx, cy + l, starPaint)
             }
         }
+    }
+
+    /** Plain average colour of a picture, a little more saturated (for tinted glass). */
+    private fun rawAverage(b: Bitmap): Int {
+        var r = 0L; var g = 0L; var bl = 0L; var n = 0
+        val sx = (b.width / 16).coerceAtLeast(1)
+        val sy = (b.height / 16).coerceAtLeast(1)
+        var y = sy / 2
+        while (y < b.height) {
+            var x = sx / 2
+            while (x < b.width) {
+                val c = b.getPixel(x, y)
+                r += (c shr 16) and 0xff; g += (c shr 8) and 0xff; bl += c and 0xff; n++
+                x += sx
+            }
+            y += sy
+        }
+        if (n == 0) return Color.rgb(120, 110, 210)
+        val hsv = FloatArray(3)
+        Color.colorToHSV(Color.rgb((r / n).toInt(), (g / n).toInt(), (bl / n).toInt()), hsv)
+        hsv[1] = (hsv[1] * 1.5f).coerceAtMost(0.8f)
+        hsv[2] = hsv[2].coerceIn(0.35f, 0.85f)
+        return Color.HSVToColor(hsv)
     }
 
     /** Average colour of the wallpaper, used as the fog colour. */
@@ -272,6 +319,17 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         // Fade to black between hinge readings 80° and 60° (fold 100° -> 120°).
         // Not when opening from the cover screen: then the cover picture should be seen.
         val away = if (opening) 0f else smoothstep((fold - 100f) / 20f)
+        strengthNow = strength
+        frame.scaleX = depthScale
+        frame.scaleY = depthScale
+        // material colour treatment of the picture (saturation / brightness grow with the fold)
+        val m = mat()
+        val sat = 1f + (m.sat - 1f) * strength
+        val bri = 1f + (m.bri - 1f) * strength
+        colorMatrix.setSaturation(sat)
+        tmpMatrix.setScale(bri, bri, bri, 1f)
+        colorMatrix.postConcat(tmpMatrix)
+        snapPaint.colorFilter = if (sat == 1f && bri == 1f) null else android.graphics.ColorMatrixColorFilter(colorMatrix)
         frame.update(strength, maxBlur, dimMax + (1f - dimMax) * away, strength, away)
     }
 
@@ -472,6 +530,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             canvas.save()
             if (movingLeft) canvas.clipRect(half, 0f, w, h) else canvas.clipRect(0f, 0f, half, h)
             drawPicture(canvas)
+            drawMaterial(canvas)
             canvas.restore()
             // swinging half
             canvas.save()
@@ -479,8 +538,56 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             canvas.drawColor(Color.BLACK)
             canvas.concat(this@ProjectionPanel.projMatrix)
             drawPicture(canvas)
+            drawMaterial(canvas)
             drawCoverPicture(canvas, half, h)
             canvas.restore()
+        }
+
+        /**
+         * The glass material on top of the picture (picture coordinates, inside its rounded
+         * outline, so the black void stays black): a tint that thickens toward the folding edge,
+         * plus a bright rim and a moving light streak for liquid glass.
+         */
+        private fun drawMaterial(canvas: Canvas) {
+            val st = strengthNow.coerceIn(0f, 1f)
+            if (st < 0.003f) return
+            val m = mat()
+            val nw = natW.toFloat()
+            val nh = natH.toFloat()
+            val r = cornerRadius
+            rect.set(0f, 0f, nw, nh)
+            if (m.alpha > 0f) {
+                val start = if (glassMode) GLASS_START else 0.3f
+                val stops = floatArrayOf(0f, start, 0.55f, 0.8f, 1f)
+                val a = floatArrayOf(0f, 0f, 0.55f, 0.85f, 1f)
+                val cols = IntArray(stops.size) { Color.argb((a[it] * m.alpha * st * 255).roundToInt(), m.r, m.g, m.b) }
+                materialPaint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, cols, stops, Shader.TileMode.CLAMP)
+                canvas.drawRoundRect(rect, r, r, materialPaint)
+            }
+            if (m.rim > 0f) {
+                val d = resources.displayMetrics.density
+                // soft inner glow + crisp rim, like the edge of curved glass
+                rimPaint.strokeWidth = 10f * d
+                rimPaint.color = Color.argb((0.16f * m.rim * st * 255).toInt(), 255, 255, 255)
+                canvas.drawRoundRect(rect, r, r, rimPaint)
+                rimPaint.strokeWidth = 1.6f * d
+                rimPaint.color = Color.argb((0.6f * m.rim * st * 255).toInt(), 255, 255, 255)
+                canvas.drawRoundRect(rect, r, r, rimPaint)
+            }
+            if (material == 1) {
+                // a light streak that slides across the swinging half as it folds
+                val half = nw / 2f
+                val pos = 0.55f - 0.35f * st                 // fraction of the half, from the hinge
+                val cx = if (movingLeft) half - half * pos else half + half * pos
+                val bw = nw * 0.08f
+                materialPaint.shader = LinearGradient(cx - bw, 0f, cx + bw, 0f,
+                    intArrayOf(Color.TRANSPARENT, Color.argb((0.2f * st * 255).toInt(), 255, 255, 255), Color.TRANSPARENT),
+                    null, Shader.TileMode.CLAMP)
+                canvas.save()
+                canvas.skew(-0.2f, 0f)
+                canvas.drawRect(cx - bw + nh * 0.1f, -nh, cx + bw + nh * 0.3f, nh * 2f, materialPaint)
+                canvas.restore()
+            }
         }
 
         /** Wallpaper (center-crop over the whole screen) with a translucent grey glass box on top. */
@@ -506,18 +613,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
                 canvas.drawRoundRect(rect, r, r, glassFallback)   // no wallpaper: deep dark glass
             }
             // no tint or border: the wallpaper itself melts into blur and darkness
-            // white frost on the picture only (not on the black void), thickening outward
-            val hz = hazeAmount.coerceIn(0f, 1f)
-            if (hz > 0.003f) {
-                val stops = floatArrayOf(0f, GLASS_START, 0.55f, 0.75f, 1f)
-                val fa = floatArrayOf(0f, 0f, 0.30f, 0.55f, 0.78f)
-                val fc = fogColor
-                val cols = IntArray(stops.size) {
-                    Color.argb((fa[it] * hz * 255).roundToInt(), Color.red(fc), Color.green(fc), Color.blue(fc))
-                }
-                frostPaint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, cols, stops, Shader.TileMode.CLAMP)
-                canvas.drawRoundRect(rect, r, r, frostPaint)
-            }
+            drawMaterial(canvas)
             // star sparkles in the picture (fainter on a real wallpaper, brighter on the placeholder)
             val base = if (wp != null) 0.75f else 1f
             drawStars(canvas, pictureStars, nw, nh) { base }
@@ -593,10 +689,13 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         private val paint = Paint()
 
         override fun onDraw(canvas: Canvas) {
-            if (glassMode) {
-                drawGlassHaze(canvas)
-                return
-            }
+            // The material layer (drawn inside the picture) replaces the old dark gradient.
+            drawGlassHaze(canvas)
+            return
+        }
+
+        @Suppress("unused")
+        private fun drawOldDim(canvas: Canvas) {
             if (dim < 0.003f) return
             val stops = floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)
             // As dim approaches 1 the gradient flattens into solid black over the swinging half
@@ -616,8 +715,8 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val w = width.toFloat()
             val h = height.toFloat()
             val hz = haze.coerceIn(0f, 1f)
-            if (hz > 0.003f) {
-                // (the white frost itself is drawn inside the picture, so the black void stays black)
+            if (hz > 0.003f && glassMode) {
+                // (the material itself is drawn inside the picture, so the black void stays black)
                 // sparkles floating in the fog: x here is the screen position, mapped to v
                 drawStars(canvas, fogStars, w, h) { xf ->
                     val v = if (movingLeft) 1f - xf else xf
