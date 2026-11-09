@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -84,6 +85,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     private var hinge: Sensor? = null
 
     private val strips = ArrayList<Strip>()
+    private var lockView: View? = null
     private var panel: ProjectionPanel? = null
     private var panelParams: WindowManager.LayoutParams? = null
 
@@ -141,6 +143,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         frameRunning = false
         removeStrips()
         removePanel()
+        unlockOrientation()
         super.onDestroy()
     }
 
@@ -205,7 +208,37 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
     // ---- animation ----
 
+    /** A tiny invisible overlay that freezes screen rotation while the effect runs. */
+    private fun lockOrientation() {
+        if (lockView != null || !Settings.canDrawOverlays(this)) return
+        val v = View(this)
+        val lp = WindowManager.LayoutParams(
+            1, 1,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.LEFT
+            screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            alpha = 0f
+        }
+        try {
+            wm.addView(v, lp)
+            lockView = v
+        } catch (e: Exception) {
+            log("orientation lock FAILED: ${e.javaClass.simpleName}")
+        }
+    }
+
+    private fun unlockOrientation() {
+        lockView?.let { runCatching { wm.removeView(it) } }
+        lockView = null
+    }
+
     private fun begin() {
+        lockOrientation()
         animating = true
         fade = 1f
         if (!frameRunning) {
@@ -222,6 +255,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         coverSweepAt = 0L
         removeStrips()
         removePanel()
+        unlockOrientation()
     }
 
     private fun tick() {
@@ -366,6 +400,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                 fitInsetsTypes = 0
                 gravity = Gravity.TOP or Gravity.LEFT
+                screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
             }
             try {
                 wm.addView(v, p)
@@ -387,14 +422,13 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     // ---- projection panel (big screen, swinging half) ----
 
     private fun renderPanel(movingLeft: Boolean, fold: Float, appear: Float, strength: Float, maxBlur: Float) {
-        val half = screenW / 2
         var p = panel
         var lp = panelParams
         if (p == null || lp == null) {
             if (!Settings.canDrawOverlays(this)) return
             p = ProjectionPanel(this)
             lp = WindowManager.LayoutParams(
-                half,
+                WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -407,8 +441,9 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                 fitInsetsTypes = 0
                 gravity = Gravity.TOP or Gravity.LEFT
-                x = if (movingLeft) 0 else screenW - half
+                x = 0
                 y = 0
+                screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
             }
             try {
                 wm.addView(p, lp)
@@ -423,7 +458,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         p.screenW = screenW
         p.screenH = screenH
         p.movingLeft = movingLeft
-        p.alpha = appear
+        p.coverage = appear
         p.update(fold, strength, maxBlur, 0.7f)
     }
 

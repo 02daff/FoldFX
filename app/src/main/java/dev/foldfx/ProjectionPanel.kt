@@ -20,30 +20,38 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
- * Covers the swinging half of the big screen and draws the "UI" (a grey placeholder for now)
- * as a picture fixed in space (perspective projection that follows the hinge angle).
+ * Full-screen effect for the big screen.
  *
- * Smooth progressive blur: several full-size copies of the picture are stacked, each blurred
- * more than the one below, and each faded in with a soft gradient further from the hinge.
- * The result is a continuous blur from sharp at the hinge to strongest at the outer edge,
- * with no visible strips.
+ * The "UI" (grey placeholder for now) is one picture fixed in space:
+ *  - on the flat half it is drawn as-is,
+ *  - on the swinging half it is drawn with a perspective projection that follows the hinge,
+ * and both meet exactly at the hinge line, so the picture is continuous.
+ *
+ * Everything is driven by one coordinate v across the whole screen:
+ *   v = 0 at the outer edge of the flat half, 0.5 at the hinge, 1 at the outer edge of the
+ *   swinging half.
+ * Blur and darkness rise smoothly with v, and the whole effect fades out toward the flat
+ * half's outer edge, so there is no line at the hinge.
  */
 class ProjectionPanel(context: Context) : FrameLayout(context) {
 
     companion object {
-        const val LAYERS = 7
+        const val LAYERS = 9
     }
 
     var screenW = 1
     var screenH = 1
-    /** true: the left half swings (hinge on this view's right edge). */
+    /** true: the left half swings. */
     var movingLeft = true
+    /** 0..1: how strongly the effect covers the screen (fades in off flat). */
+    var coverage = 0f
 
     private val projMatrix = Matrix()
     private val src = FloatArray(8)
     private val dst = FloatArray(8)
     private val layers = ArrayList<BlurLayer>()
     private val dimView = DimView(context)
+    private val fadePaint = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
 
     init {
         val m = LayoutParams.MATCH_PARENT
@@ -53,46 +61,59 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             addView(l, LayoutParams(m, m))
         }
         addView(dimView, LayoutParams(m, m))
+        setWillNotDraw(false)
     }
 
-    /**
-     * fold: degrees the panel has swung from flat. strength: 0..1 overall effect.
-     * maxBlur: blur at the outer edge at full strength. dimMax: darkness at the outer edge.
-     */
     fun update(fold: Float, strength: Float, maxBlur: Float, dimMax: Float) {
         computeMatrix(fold)
         val step = 1f / (LAYERS - 1)
         for (k in 0 until LAYERS) {
-            val xk = k * step                                   // 0 = hinge, 1 = outer edge
-            val b = maxBlur * strength * xk.pow(0.75f)          // rises quickly away from the hinge
-            layers[k].set(b, xk, step)
+            val vk = k * step
+            layers[k].set(maxBlur * strength * vk.pow(1.3f), vk, step)
         }
         dimView.dim = dimMax * strength
         dimView.invalidate()
+        invalidate()
     }
 
-    /** distance from hinge (0..1) -> x in this view */
-    private fun viewX(dist: Float): Float = if (movingLeft) width * (1f - dist) else width * dist
+    /** v (0..1 across the screen, see class doc) -> x in this view */
+    private fun viewX(v: Float): Float = if (movingLeft) width * (1f - v) else width * v
+
+    /** Fade the whole effect out toward the flat half's outer edge. */
+    override fun dispatchDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val save = canvas.saveLayer(0f, 0f, w, h, null)
+        super.dispatchDraw(canvas)
+        val c = coverage.coerceIn(0f, 1f)
+        val stops = floatArrayOf(0f, 0.2f, 0.4f, 0.5f, 0.6f, 1f)
+        val alphas = floatArrayOf(0f, 0.12f, 0.55f, 0.85f, 1f, 1f)
+        val colors = IntArray(stops.size) { Color.argb((alphas[it] * c * 255).roundToInt(), 0, 0, 0) }
+        fadePaint.shader = LinearGradient(viewX(0f), 0f, viewX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
+        canvas.drawRect(0f, 0f, w, h, fadePaint)
+        canvas.restoreToCount(save)
+    }
 
     private fun computeMatrix(foldDeg: Float) {
-        val w = width.toFloat().coerceAtLeast(1f)
+        val half = width / 2f
         val h = height.toFloat().coerceAtLeast(1f)
         val phi = Math.toRadians(foldDeg.toDouble())
         val c = cos(phi).toFloat()
         val s = sin(phi).toFloat()
         val zc = 2.5f * screenW
         val cy = h / 2f
-        val ds = floatArrayOf(0f, w, w, 0f)
+        val ds = floatArrayOf(0f, half, half, 0f)
         val ys = floatArrayOf(0f, 0f, h, h)
+        val sign = if (movingLeft) -1f else 1f
         for (k in 0 until 4) {
             val d = ds[k]
             val y = ys[k]
             val t = zc / (zc - d * s).coerceAtLeast(1f)
             val xi = d * c * t
             val yi = cy + t * (y - cy)
-            src[k * 2] = if (movingLeft) w - xi else w + xi
+            src[k * 2] = half + sign * xi        // picture point seen through this panel point
             src[k * 2 + 1] = yi
-            dst[k * 2] = if (movingLeft) w - d else d
+            dst[k * 2] = half + sign * d         // the panel point on screen
             dst[k * 2 + 1] = y
         }
         projMatrix.setPolyToPoly(src, 0, dst, 0, 4)
@@ -102,7 +123,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
 
     private inner class BlurLayer(context: Context, private val index: Int) : FrameLayout(context) {
         private val content = ContentView(context)
-        private var xk = 0f
+        private var vk = 0f
         private var ramp = 0f
         private val maskPaint = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
 
@@ -111,8 +132,8 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             setWillNotDraw(false)
         }
 
-        fun set(blur: Float, xk: Float, ramp: Float) {
-            this.xk = xk
+        fun set(blur: Float, vk: Float, ramp: Float) {
+            this.vk = vk
             this.ramp = ramp
             content.setBlur(blur)
             content.invalidate()
@@ -120,7 +141,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         }
 
         override fun dispatchDraw(canvas: Canvas) {
-            if (index == 0) {          // bottom layer: full, sharpest
+            if (index == 0) {
                 super.dispatchDraw(canvas)
                 return
             }
@@ -128,16 +149,15 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             val h = height.toFloat()
             val save = canvas.saveLayer(0f, 0f, w, h, null)
             super.dispatchDraw(canvas)
-            // transparent before (xk - ramp), fully visible from xk outward
-            val xs = viewX((xk - ramp).coerceAtLeast(0f))
-            val xe = viewX(xk)
+            val xs = viewX((vk - ramp).coerceAtLeast(0f))
+            val xe = viewX(vk)
             maskPaint.shader = LinearGradient(xs, 0f, xe, 0f, Color.TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP)
             canvas.drawRect(0f, 0f, w, h, maskPaint)
             canvas.restoreToCount(save)
         }
     }
 
-    // ---- the projected picture ----
+    // ---- the picture: flat half as-is, swinging half projected ----
 
     private inner class ContentView(context: Context) : View(context) {
         private var blur = -1
@@ -157,7 +177,17 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         }
 
         override fun onDraw(canvas: Canvas) {
+            val w = width.toFloat()
+            val h = height.toFloat()
+            val half = w / 2f
+            // flat half
             canvas.save()
+            if (movingLeft) canvas.clipRect(half, 0f, w, h) else canvas.clipRect(0f, 0f, half, h)
+            drawPlaceholderUi(canvas)
+            canvas.restore()
+            // swinging half
+            canvas.save()
+            if (movingLeft) canvas.clipRect(0f, 0f, half, h) else canvas.clipRect(half, 0f, w, h)
             canvas.concat(this@ProjectionPanel.projMatrix)
             drawPlaceholderUi(canvas)
             canvas.restore()
@@ -184,7 +214,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         }
     }
 
-    // ---- dark glass: smooth darkening toward the outer edge ----
+    // ---- dark glass: smooth darkening rising toward the swinging edge ----
 
     private inner class DimView(context: Context) : View(context) {
         var dim = 0f
@@ -192,12 +222,11 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
 
         override fun onDraw(canvas: Canvas) {
             if (dim < 0.003f) return
-            val a0 = (dim * 0.30f * 255).roundToInt().coerceIn(0, 255)
-            val a1 = (dim * 255).roundToInt().coerceIn(0, 255)
-            paint.shader = LinearGradient(
-                viewX(0f), 0f, viewX(1f), 0f,
-                Color.argb(a0, 0, 0, 0), Color.argb(a1, 0, 0, 0), Shader.TileMode.CLAMP
-            )
+            val stops = floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)
+            val colors = IntArray(stops.size) {
+                Color.argb((dim * stops[it].pow(1.4f) * 255).roundToInt().coerceIn(0, 255), 0, 0, 0)
+            }
+            paint.shader = LinearGradient(viewX(0f), 0f, viewX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
         }
     }
