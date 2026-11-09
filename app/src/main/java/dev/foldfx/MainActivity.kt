@@ -104,7 +104,7 @@ class MainActivity : Activity(), SensorEventListener {
         blurLabel = TextView(this).apply { setPadding(0, pad, 0, 0) }
         col.addView(blurLabel)
         col.addView(SeekBar(this).apply {
-            max = 150
+            max = 200
             progress = Prefs.maxBlur(this@MainActivity)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, value: Int, fromUser: Boolean) {

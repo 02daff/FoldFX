@@ -263,7 +263,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
             // fold = how far the swinging half has turned away from flat
             val fold = (180f - angle).coerceIn(0f, 179f)
-            val strength = smooth((fold / 90f).coerceIn(0f, 1f)) * fade      // blur/dark grow as it closes
+            val strength = smooth((fold / 60f).coerceIn(0f, 1f)) * fade      // full effect by 60° of fold
             val appear = smooth((fold / 20f).coerceIn(0f, 1f)) * fade        // projection fades in off flat
             for (i in 0 until STRIPS) {
                 val x = (i + 0.5f) / STRIPS                 // 0 = at hinge, 1 = outer edge
@@ -274,7 +274,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             else (fold < 1.5f && abs(targetAngle - shownAngle) < 0.5f) || (still && fade < 0.02f)
 
             if (!done) {
-                renderPanel(movingLeft, fold, appear, blur, dim)
+                renderPanel(movingLeft, fold, appear, strength, maxBlur)
                 Choreographer.getInstance().postFrameCallback(frame)
                 return
             }
@@ -386,13 +386,13 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
     // ---- projection panel (big screen, swinging half) ----
 
-    private fun renderPanel(movingLeft: Boolean, fold: Float, appear: Float, blur: FloatArray, dim: FloatArray) {
+    private fun renderPanel(movingLeft: Boolean, fold: Float, appear: Float, strength: Float, maxBlur: Float) {
         val half = screenW / 2
         var p = panel
         var lp = panelParams
         if (p == null || lp == null) {
             if (!Settings.canDrawOverlays(this)) return
-            p = ProjectionPanel(this, STRIPS)
+            p = ProjectionPanel(this)
             lp = WindowManager.LayoutParams(
                 half,
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -424,7 +424,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         p.screenH = screenH
         p.movingLeft = movingLeft
         p.alpha = appear
-        p.update(fold, blur, dim)
+        p.update(fold, strength, maxBlur, 0.7f)
     }
 
     private fun removePanel() {
