@@ -68,7 +68,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         private const val FLAT_AT = 175f            // hinge angle treated as fully open
         private const val START_BELOW = 173f        // effect starts only below this angle
         private const val FULL_EFFECT_AT = 40f      // effect is at full strength 40° away from flat
-        private const val IDLE_FADE_MS = 1200L      // held still half-open this long -> fade out
+        private const val IDLE_FADE_MS = 1500L      // held still half-open this long -> quick fade out
         private const val COVER_SWEEP_MS = 650f     // cover screen sharpening sweep
         private const val PREVIEW_MS = 2200L
     }
@@ -485,7 +485,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 angle = shownAngle
             }
             val still = !preview && now - lastMoveAt > IDLE_FADE_MS
-            if (still) fade += (0f - fade) * 0.15f
+            if (still) fade += (0f - fade) * 0.3f   // quick (about 1/4 s), so it doesn't look see-through for long
 
             // fold = how far the swinging half has turned away from flat.
             // A quick fold-and-back is held briefly (decays at 300°/s) so it is always seen.
@@ -498,7 +498,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             // grows all the way from flat to closed (fast at first, then keeps building)
             // full blur by a hinge reading of 80° (fold 100°)
             val strength = (fold / 100f).coerceIn(0f, 1f).pow(0.6f) * fade
-            val appear = smooth((fold / 20f).coerceIn(0f, 1f)) * fade        // projection fades in off flat
+            val appear = smooth((fold / 8f).coerceIn(0f, 1f)) * fade         // solid within the first 8° of folding
             for (i in 0 until STRIPS) {
                 val x = (i + 0.5f) / STRIPS                 // 0 = at hinge, 1 = outer edge
                 blur[i] = maxBlur * strength * (0.15f + 0.85f * x * x)
@@ -699,7 +699,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 p.visibility = View.GONE
                 p.screenW = screenW
                 p.screenH = screenH
-                log("effect window ready (" + (if (a11y != null) "full opacity" else "80% overlay") + ")")
+                log("effect window ready (" + (if (a11y != null) "accessibility overlay" else "app overlay") + ", opaque)")
             } catch (e: Exception) {
                 log("projection FAILED: ${e.javaClass.simpleName}")
                 return null
