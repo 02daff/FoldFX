@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="a11y_description">FoldFX takes one screenshot when you start folding the phone, only to draw the fold animation. The picture stays in memory for that animation and is never saved or sent anywhere.</string>
+</resources>

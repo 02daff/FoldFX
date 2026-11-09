@@ -1,6 +1,8 @@
 package dev.foldfx
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -46,6 +48,23 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
     /** 0..1: how strongly the effect covers the screen (fades in off flat). */
     var coverage = 0f
 
+    /** Real screenshot to project; null = grey placeholder. */
+    var snapshot: Bitmap? = null
+        set(value) {
+            field = value
+            snapShader = value?.let { BitmapShader(it, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP) }
+            snapShaderFor = -1
+        }
+    private var snapShader: BitmapShader? = null
+    private var snapShaderFor = -1
+    private val snapPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private val shaderMatrix = Matrix()
+
+    // projection parameters of the current frame (for viewing-angle blur)
+    private var curCos = 1f
+    private var curSin = 0f
+    private var curZc = 1f
+
     private val projMatrix = Matrix()
     private val src = FloatArray(8)
     private val dst = FloatArray(8)
@@ -69,11 +88,26 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         val step = 1f / (LAYERS - 1)
         for (k in 0 until LAYERS) {
             val vk = k * step
-            layers[k].set(maxBlur * strength * vk.pow(1.3f), vk, step)
+            val base = maxBlur * strength * vk.pow(1.3f)
+            layers[k].set((base * viewStretch(vk)).coerceAtMost(maxBlur * 3f), vk, step)
         }
         dimView.dim = dimMax * strength
         dimView.invalidate()
         invalidate()
+    }
+
+    /**
+     * How much the picture is stretched on the panel at position v, as seen from the viewer.
+     * Blur is defined on the picture, so where the panel turns away from you (picture stretched
+     * on the screen) the on-screen blur must be larger. 1 on the flat half.
+     */
+    private fun viewStretch(v: Float): Float {
+        if (v <= 0.5f) return 1f
+        val half = width / 2f
+        val d = (v - 0.5f) * 2f * half
+        val denom = (curZc - d * curSin).coerceAtLeast(1f)
+        val dxdd = kotlin.math.abs(curCos) * curZc * curZc / (denom * denom)   // picture px per panel px
+        return (1f / dxdd.coerceAtLeast(0.3f)).coerceIn(1f, 3.3f)
     }
 
     /** v (0..1 across the screen, see class doc) -> x in this view */
@@ -101,6 +135,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
         val c = cos(phi).toFloat()
         val s = sin(phi).toFloat()
         val zc = 2.5f * screenW
+        curCos = c; curSin = s; curZc = zc
         val cy = h / 2f
         val ds = floatArrayOf(0f, half, half, 0f)
         val ys = floatArrayOf(0f, 0f, h, h)
@@ -193,10 +228,23 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             canvas.restore()
         }
 
-        /** Grey stand-in for the screen content: a grey box with a grid of lighter tiles. */
+        /** The screenshot (edges extended), or a grey stand-in when there is none. */
         private fun drawPlaceholderUi(canvas: Canvas) {
             val sw = screenW.toFloat()
             val sh = screenH.toFloat()
+            val bmp = this@ProjectionPanel.snapshot
+            val shader = this@ProjectionPanel.snapShader
+            if (bmp != null && shader != null && !bmp.isRecycled) {
+                val key = screenW * 31 + screenH
+                if (snapShaderFor != key) {
+                    shaderMatrix.setScale(sw / bmp.width, sh / bmp.height)
+                    shader.setLocalMatrix(shaderMatrix)
+                    snapShaderFor = key
+                }
+                snapPaint.shader = shader
+                canvas.drawRect(-sw, -sh, sw * 2f, sh * 2f, snapPaint)
+                return
+            }
             canvas.drawRect(-sw, -sh, sw * 2f, sh * 2f, grey)
             val cols = 8
             val pad = sw * 0.04f

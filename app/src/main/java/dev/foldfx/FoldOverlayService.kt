@@ -86,6 +86,13 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
     private val strips = ArrayList<Strip>()
     private var lockView: View? = null
+
+    // screenshot for the projection
+    private enum class Snap { NONE, WAITING, READY }
+    private var snapState = Snap.NONE
+    private var snapAskedAt = 0L
+    private var snapshot: android.graphics.Bitmap? = null
+    private var panelHost: WindowManager? = null
     private var panel: ProjectionPanel? = null
     private var panelParams: WindowManager.LayoutParams? = null
 
@@ -195,6 +202,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         log("switched to ${if (nowCover) "cover" else "big"} screen at ${targetAngle.roundToInt()}°")
         removeStrips()   // re-create overlays for the new screen size
         removePanel()
+        clearSnapshot()
         if (nowCover) {
             coverSweepAt = SystemClock.uptimeMillis()
             begin()
@@ -207,6 +215,35 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
     }
 
     // ---- animation ----
+
+    /** Ask for one screenshot of the current screen before the effect becomes visible. */
+    private fun requestSnapshot() {
+        if (snapState != Snap.NONE) return
+        snapAskedAt = SystemClock.uptimeMillis()
+        snapState = Snap.WAITING
+        val asked = FoldAccessibilityService.capture { bmp ->
+            if (snapState == Snap.WAITING) {
+                snapshot?.recycle()
+                snapshot = bmp
+                snapState = Snap.READY
+                log(if (bmp != null) "screenshot ${bmp.width}x${bmp.height} in ${SystemClock.uptimeMillis() - snapAskedAt} ms" else "no screenshot, using grey")
+                panel?.snapshot = bmp
+            } else {
+                bmp?.recycle()
+            }
+        }
+        if (!asked) {
+            snapState = Snap.READY
+            log("screenshot access off, using grey")
+        }
+    }
+
+    private fun clearSnapshot() {
+        panel?.snapshot = null
+        snapshot?.recycle()
+        snapshot = null
+        snapState = Snap.NONE
+    }
 
     /** A tiny invisible overlay that freezes screen rotation while the effect runs. */
     private fun lockOrientation() {
@@ -239,6 +276,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
     private fun begin() {
         lockOrientation()
+        if (!isCover(screenW, screenH)) requestSnapshot()
         animating = true
         fade = 1f
         if (!frameRunning) {
@@ -256,6 +294,7 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         removeStrips()
         removePanel()
         unlockOrientation()
+        clearSnapshot()
     }
 
     private fun tick() {
@@ -297,7 +336,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
 
             // fold = how far the swinging half has turned away from flat
             val fold = (180f - angle).coerceIn(0f, 179f)
-            val strength = smooth((fold / 60f).coerceIn(0f, 1f)) * fade      // full effect by 60° of fold
+            // grows all the way from flat to closed (fast at first, then keeps building)
+            val strength = (fold / 160f).coerceIn(0f, 1f).pow(0.6f) * fade
             val appear = smooth((fold / 20f).coerceIn(0f, 1f)) * fade        // projection fades in off flat
             for (i in 0 until STRIPS) {
                 val x = (i + 0.5f) / STRIPS                 // 0 = at hinge, 1 = outer edge
@@ -308,7 +348,8 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
             else (fold < 1.5f && abs(targetAngle - shownAngle) < 0.5f) || (still && fade < 0.02f)
 
             if (!done) {
-                renderPanel(movingLeft, fold, appear, strength, maxBlur)
+                val waiting = snapState == Snap.WAITING && now - snapAskedAt < 250L
+                if (!waiting) renderPanel(movingLeft, fold, appear, strength, maxBlur)
                 Choreographer.getInstance().postFrameCallback(frame)
                 return
             }
@@ -425,19 +466,25 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         var p = panel
         var lp = panelParams
         if (p == null || lp == null) {
-            if (!Settings.canDrawOverlays(this)) return
-            p = ProjectionPanel(this)
+            // Prefer an accessibility overlay: Android lets it be fully opaque, so the projected
+            // picture fully replaces the screen. Otherwise a normal overlay capped at 80%.
+            val a11y = FoldAccessibilityService.instance
+            val hostCtx: android.content.Context = a11y ?: this
+            val host = if (a11y != null) a11y.getSystemService(WindowManager::class.java) else wm
+            if (a11y == null && !Settings.canDrawOverlays(this)) return
+            p = ProjectionPanel(hostCtx)
             lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                if (a11y != null) WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                else WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                alpha = 0.8f   // Android blocks touches under untrusted overlays more opaque than 0.8
+                alpha = if (a11y != null) 1f else 0.8f
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                 fitInsetsTypes = 0
                 gravity = Gravity.TOP or Gravity.LEFT
@@ -446,10 +493,11 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
                 screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
             }
             try {
-                wm.addView(p, lp)
+                host.addView(p, lp)
                 panel = p
                 panelParams = lp
-                log("projection shown")
+                panelHost = host
+                log("projection shown (" + (if (a11y != null) "full opacity" else "80% overlay") + ")")
             } catch (e: Exception) {
                 log("projection FAILED: ${e.javaClass.simpleName}")
                 return
@@ -458,14 +506,16 @@ class FoldOverlayService : Service(), SensorEventListener, DisplayManager.Displa
         p.screenW = screenW
         p.screenH = screenH
         p.movingLeft = movingLeft
+        if (p.snapshot !== snapshot) p.snapshot = snapshot
         p.coverage = appear
         p.update(fold, strength, maxBlur, 0.7f)
     }
 
     private fun removePanel() {
-        panel?.let { runCatching { wm.removeView(it) } }
+        panel?.let { v -> runCatching { (panelHost ?: wm).removeView(v) } }
         panel = null
         panelParams = null
+        panelHost = null
     }
 
     private fun blurAvailable(): Boolean =

@@ -74,6 +74,10 @@ class MainActivity : Activity(), SensorEventListener {
             )
         })
 
+        col.addView(button("Turn on screenshot access (Accessibility)") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        })
+
         col.addView(button("2. Start fold animation") {
             startForegroundService(Intent(this, FoldOverlayService::class.java))
             handler.postDelayed({ refresh() }, 500)
@@ -191,6 +195,7 @@ class MainActivity : Activity(), SensorEventListener {
                 else -> "OFF. Turn off Battery saver / power saving, and in Developer options enable \"Allow window-level blurs\". Frost-only until then."
             })
             appendLine("Animation service: " + if (FoldOverlayService.running) "running" else "stopped")
+            appendLine("Screenshot access: " + if (FoldAccessibilityService.instance != null) "ON (real screen in the effect)" else "off (grey placeholder)")
             append("\nFold the phone slowly and watch the angle above. It should change smoothly.")
         }
         blurLabel.text = "Max blur: ${Prefs.maxBlur(this)} px"
