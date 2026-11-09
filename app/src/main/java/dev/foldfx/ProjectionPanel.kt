@@ -405,9 +405,7 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             } else {
                 canvas.drawRoundRect(rect, r, r, grey)
             }
-            canvas.drawRoundRect(rect, r, r, glassFill)
-            glassEdge.strokeWidth = (nw * 0.003f).coerceAtLeast(2f)
-            canvas.drawRoundRect(rect, r, r, glassEdge)
+            // no tint or border: the wallpaper itself melts into blur and darkness
         }
 
         /** The cover screen's picture, filling the swinging half (center-crop), fading out. */
@@ -498,15 +496,16 @@ class ProjectionPanel(context: Context) : FrameLayout(context) {
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
         }
 
-        /** Milky haze growing toward the far edge; black only as the panel turns away. */
+        /** Dark tint deepening toward the far edge; full black as the panel turns away. */
         private fun drawGlassHaze(canvas: Canvas) {
             val w = width.toFloat()
             val h = height.toFloat()
             val hz = haze.coerceIn(0f, 1f)
             if (hz > 0.003f) {
+                // deepening dark tint toward the far edge (like the iPhone's dark glass)
                 val stops = floatArrayOf(0f, GLASS_START, 0.55f, 0.75f, 1f)
-                val a = floatArrayOf(0f, 0f, 0.10f, 0.28f, 0.45f)
-                val colors = IntArray(stops.size) { Color.argb((a[it] * hz * 255).roundToInt(), 235, 237, 242) }
+                val a = floatArrayOf(0f, 0f, 0.15f, 0.42f, 0.72f)
+                val colors = IntArray(stops.size) { Color.argb((a[it] * hz * 255).roundToInt(), 16, 12, 26) }
                 paint.shader = LinearGradient(natX(0f), 0f, natX(1f), 0f, colors, stops, Shader.TileMode.CLAMP)
                 canvas.drawRect(0f, 0f, w, h, paint)
             }
